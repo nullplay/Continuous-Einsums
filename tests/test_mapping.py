@@ -58,6 +58,7 @@ from synth_dataset import (
 )
 from table_mapping import build_table_mapping
 from table_opt_mapping import build_table_opt_mapping
+from table_kernel_mapping import build_table_kernel_mapping
 
 
 DTYPE = DEFAULT_DTYPE
@@ -105,6 +106,7 @@ class MappingCase:
     total_candidates: int
     table_auto: Callable[[], torch.Tensor]
     table_opt_auto: Callable[[], tuple[torch.Tensor, ...]]
+    table_kernel_auto: Callable[[], tuple[torch.Tensor, ...]]
 
 
 @dataclass(frozen=True)
@@ -187,6 +189,7 @@ def _case(
     piece_cols: tuple[str, ...],
     table_auto: Callable[[], torch.Tensor],
     table_opt_auto: Callable[[], tuple[torch.Tensor, ...]],
+    table_kernel_auto: Callable[[], tuple[torch.Tensor, ...]],
     total_candidates: int | None = None,
 ) -> MappingCase:
     return MappingCase(
@@ -200,6 +203,7 @@ def _case(
         ),
         table_auto=table_auto,
         table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -207,11 +211,17 @@ def _auto_builders(
     op: dict[str, torch.Tensor],
     output: tuple[str, ...],
     eqs: list[str],
-) -> tuple[Callable[[], torch.Tensor], Callable[[], tuple[torch.Tensor, ...]]]:
-    """Build the brute-force and optimized auto mappings from one DSL spec."""
+) -> tuple[
+    Callable[[], torch.Tensor],
+    Callable[[], tuple[torch.Tensor, ...]],
+    Callable[[], tuple[torch.Tensor, ...]],
+]:
+    """Build the brute-force, searchsorted-optimized, and kernel auto mappings
+    from one DSL spec."""
     return (
         build_table_mapping(op, output, eqs),
         build_table_opt_mapping(op, output, eqs),
+        build_table_kernel_mapping(op, output, eqs),
     )
 
 
@@ -247,13 +257,16 @@ def case_01_pointwise_1d_pp(n: int, skew: float) -> MappingCase:
     auto_op = {"A_x": a, "B_x": b}
     auto_output = ("A", "B")
     auto_eqs = ["A_x[A] == B_x[B]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "01_pointwise_1d_pp", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -290,13 +303,16 @@ def case_02_pointwise_1d_ii(n: int, skew: float) -> MappingCase:
     auto_op = {"A_s": a_s, "A_e": a_e, "B_s": b_s, "B_e": b_e}
     auto_output = ("A", "B")
     auto_eqs = ["A_s[A] < B_e[B]", "B_s[B] < A_e[A]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "02_pointwise_1d_ii", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -332,13 +348,16 @@ def case_03_pointwise_1d_pi(n: int, skew: float) -> MappingCase:
     auto_op = {"A_x": a, "B_s": b_s, "B_e": b_e}
     auto_output = ("A", "B")
     auto_eqs = ["A_x[A] >= B_s[B]", "A_x[A] < B_e[B]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "03_pointwise_1d_pi", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -375,13 +394,16 @@ def case_04_pointwise_2d_pp(n: int, skew: float) -> MappingCase:
     auto_op = {"A_i": a_i, "A_j": a_j, "B_i": b_i, "B_j": b_j}
     auto_output = ("A", "B")
     auto_eqs = ["A_i[A] == B_i[B]", "A_j[A] == B_j[B]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "04_pointwise_2d_pp", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -435,13 +457,16 @@ def case_05_pointwise_2d_ii(n: int, skew: float) -> MappingCase:
         "A_i_s[A] < B_i_e[B]", "B_i_s[B] < A_i_e[A]",
         "A_j_s[A] < B_j_e[B]", "B_j_s[B] < A_j_e[A]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "05_pointwise_2d_ii", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -489,13 +514,16 @@ def case_06_pointwise_2d_pi(n: int, skew: float) -> MappingCase:
     }
     auto_output = ("A", "B")
     auto_eqs = ["A_i[A] == B_i[B]", "A_j_s[A] < B_j_e[B]", "B_j_s[B] < A_j_e[A]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "06_pointwise_2d_pi", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -560,13 +588,16 @@ def case_07_diagonal_ii_i(n: int, skew: float) -> MappingCase:
         "A_i0_s[A] < B_e[B]",    "B_s[B] < A_i0_e[A]",
         "A_i1_s[A] < B_e[B]",    "B_s[B] < A_i1_e[A]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "07_diagonal_ii_i", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -622,13 +653,16 @@ def case_08_diagonal_ii_p(n: int, skew: float) -> MappingCase:
         "B_x[B] >= A_i0_s[A]", "B_x[B] < A_i0_e[A]",
         "B_x[B] >= A_i1_s[A]", "B_x[B] < A_i1_e[A]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "08_diagonal_ii_p", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -659,13 +693,16 @@ def case_09_reduce_1d_pp(n: int, skew: float) -> MappingCase:
     auto_op = {"A_k": a_k, "B_k": b_k}
     auto_output = ("A", "B")
     auto_eqs = ["A_k[A] == B_k[B]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "09_reduce_1d_pp", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -702,13 +739,16 @@ def case_10_reduce_1d_ii(n: int, skew: float) -> MappingCase:
     auto_op = {"A_k_s": a_ks, "A_k_e": a_ke, "B_k_s": b_s, "B_k_e": b_e}
     auto_output = ("A", "B")
     auto_eqs = ["A_k_s[A] < B_k_e[B]", "B_k_s[B] < A_k_e[A]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "10_reduce_1d_ii", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -739,13 +779,16 @@ def case_11_matmul_pp(n: int, skew: float) -> MappingCase:
     auto_op = {"A_k": a_k, "B_k": b_k}
     auto_output = ("A", "B")
     auto_eqs = ["A_k[A] == B_k[B]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "11_matmul_pp", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -782,13 +825,16 @@ def case_12_matmul_ii(n: int, skew: float) -> MappingCase:
     auto_op = {"A_k_s": a_ks, "A_k_e": a_ke, "B_k_s": b_s, "B_k_e": b_e}
     auto_output = ("A", "B")
     auto_eqs = ["A_k_s[A] < B_k_e[B]", "B_k_s[B] < A_k_e[A]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "12_matmul_ii", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -831,13 +877,16 @@ def case_13_triple_1d_pp(n: int, skew: float) -> MappingCase:
     auto_op = {"A_x": a, "B_x": b, "C_x": c}
     auto_output = ("A", "B", "C")
     auto_eqs = ["A_x[A] == B_x[B]", "A_x[A] == C_x[C]"]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "13_triple_1d_pp", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece", "C_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -905,13 +954,16 @@ def case_14_triple_1d_ii(n: int, skew: float) -> MappingCase:
         "A_s[A] < C_e[C]", "C_s[C] < A_e[A]",
         "B_s[B] < C_e[C]", "C_s[C] < B_e[B]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "14_triple_1d_ii", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece", "C_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -974,13 +1026,16 @@ def case_15_triple_2d_pp(n: int, skew: float) -> MappingCase:
         "A_i[A] == B_i[B]", "A_j[A] == B_j[B]",
         "A_i[A] == C_i[C]", "A_j[A] == C_j[C]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "15_triple_2d_pp", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece", "C_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -1069,13 +1124,16 @@ def case_16_triple_2d_ii(n: int, skew: float) -> MappingCase:
         "B_i_s[B] < C_i_e[C]", "C_i_s[C] < B_i_e[B]",
         "B_j_s[B] < C_j_e[C]", "C_j_s[C] < B_j_e[B]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "16_triple_2d_ii", skew, n,
         table_mapping, polars_plan,
         ("A_piece", "B_piece", "C_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -1135,7 +1193,9 @@ def case_17_box_search(n: int, skew: float) -> MappingCase:
         "Points_x[Points] >= Box_x_s[Box]", "Points_x[Points] < Box_x_e[Box]",
         "Points_y[Points] >= Box_y_s[Box]", "Points_y[Points] < Box_y_e[Box]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "17_box_search", skew, n,
@@ -1143,6 +1203,7 @@ def case_17_box_search(n: int, skew: float) -> MappingCase:
         ("Box_piece", "Points_piece"),
         total_candidates=n,
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -1195,13 +1256,16 @@ def case_18_bio_intersect(n: int, skew: float) -> MappingCase:
         "Query_x_s[Query] < Data_x_e[Data]",
         "Data_c[Data] == Query_c[Query]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "18_bio_intersect", skew, n,
         table_mapping, polars_plan,
         ("Data_piece", "Query_piece"),
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -1299,7 +1363,9 @@ def case_19_point_cloud(n: int, skew: float) -> MappingCase:
         "In_z[In] >= Mask_z[Mask] + Weight_t_s[Weight]",
         "In_z[In] < Mask_z[Mask] + Weight_t_e[Weight]",
     ]
-    table_auto, table_opt_auto = _auto_builders(auto_op, auto_output, auto_eqs)
+    table_auto, table_opt_auto, table_kernel_auto = _auto_builders(
+        auto_op, auto_output, auto_eqs
+    )
 
     return _case(
         "19_point_cloud", skew, n,
@@ -1307,6 +1373,7 @@ def case_19_point_cloud(n: int, skew: float) -> MappingCase:
         ("Mask_piece", "In_piece", "Weight_piece"),
         total_candidates=n * n * 27,
         table_auto=table_auto, table_opt_auto=table_opt_auto,
+        table_kernel_auto=table_kernel_auto,
     )
 
 
@@ -1394,6 +1461,13 @@ def _assert_table_and_polars_agree(case: MappingCase) -> int:
         table_rows.shape,
     )
     assert torch.equal(opt_rows, table_rows), case.label
+    kernel_rows = _canonical_cols(case.table_kernel_auto())
+    assert kernel_rows.shape == table_rows.shape, (
+        case.label,
+        kernel_rows.shape,
+        table_rows.shape,
+    )
+    assert torch.equal(kernel_rows, table_rows), case.label
     return int(table_rows.shape[0])
 
 
@@ -1480,6 +1554,9 @@ def test_mapping_backend_benchmark(
                 )
                 table_auto = _compile_table_fn(case.table_auto) if run_table else None
                 table_opt_auto = _compile_table_fn(case.table_opt_auto)
+                # The Triton kernel launches eagerly; torch.compile can't trace
+                # through it (and would graph-break anyway), so run it as-is.
+                table_kernel_auto = case.table_kernel_auto
 
                 polars_plan_obj = case.polars_plan() if run_polars else None
 
@@ -1506,6 +1583,15 @@ def test_mapping_backend_benchmark(
                 reference_rows = table_rows if table_rows is not None else opt_auto_rows
                 assert torch.equal(opt_auto_rows, reference_rows), (
                     f"{case.label} table_opt_auto mismatch"
+                )
+
+                kernel_auto_out = table_kernel_auto()
+                kernel_auto_rows = _canonical_cols(kernel_auto_out)
+                del kernel_auto_out
+                if DEVICE.type == "cuda":
+                    torch.cuda.empty_cache()
+                assert torch.equal(kernel_auto_rows, reference_rows), (
+                    f"{case.label} table_kernel_auto mismatch"
                 )
 
                 if table_auto is not None:
@@ -1537,6 +1623,7 @@ def test_mapping_backend_benchmark(
                 table_ms = _time_callable(table_mapping, repeats)
                 auto_ms = _time_callable(table_auto, repeats)
                 opt_auto_ms = _time_callable(table_opt_auto, repeats)
+                kernel_auto_ms = _time_callable(table_kernel_auto, repeats)
                 polars_ms: float | None = None
                 if run_polars:
                     polars_times: list[float] = []
@@ -1556,6 +1643,7 @@ def test_mapping_backend_benchmark(
                     f"skew={case.skew:g} "
                     f"table_ms={_fmt(table_ms)} "
                     f"table_auto_ms={_fmt(auto_ms)} table_opt_auto_ms={_fmt(opt_auto_ms)} "
+                    f"table_kernel_auto_ms={_fmt(kernel_auto_ms)} "
                     f"polars_ms={_fmt(polars_ms)}"
                 )
             except (torch.cuda.OutOfMemoryError, MemoryError) as e:
