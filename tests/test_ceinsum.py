@@ -158,7 +158,9 @@ def test_ij_i_j__i():
 
     # (t1.0,t2.0): [0,2)∩[1,4]=[1,2), v=2*10*100=2000
     # (t1.1,t2.0): [1,3)∩[1,4]=[1,3), v=3*10*200=6000
-    expected = _ct([(_T(1.0, 1.0), _T(2.0, 3.0))], _T(2000.0, 6000.0), ["[)"])
+    # j is contracted, so these two overlapping i-pieces are summed where they
+    # overlap (coalesce step): [1,2)→2000+6000=8000, [2,3)→6000.
+    expected = _ct([(_T(1.0, 2.0), _T(2.0, 3.0))], _T(8000.0, 6000.0), ["[)"])
     assert_ceinsum(out, expected, "ij,i,j->i")
 
 
@@ -179,6 +181,30 @@ def test_ij_j__i_reduction_scatter_add():
     # t1.p1 (j=3) matches t2.q2     → piece (t1.1): 4*30 = 120,      i=[5,7)
     expected = _ct([(_T(0.0, 5.0), _T(2.0, 7.0))], _T(60.0, 120.0), ["[)"])
     assert_ceinsum(out, expected, "ij,j->i reduction")
+
+
+@requires_ceinsum
+def test_ij_i__i_coalesce_overlapping_reduction():
+    """ij,i->i — contracting pinpoint j leaves overlapping i-pieces that the
+    coalesce step splits at every boundary and sums per region."""
+    t1 = _ct(
+        [(_T(0.0, 5.0, 3.0), _T(10.0, 15.0, 13.0)),  # i: [0,10), [5,15), [3,13)
+         (_T(0.0, 1.0, 2.0),)],                       # j pinpoints: 0, 1, 2
+        _T(1.0, 1.0, 1.0),
+        ["[)", "P"],
+    )
+    t2 = _ct([(_T(2.0), _T(11.0))], _T(1.0), ["[)"])  # i: [2,11)
+
+    out = ceinsum("ij,i->i", t1, t2)
+
+    # raw (overlapping) contributions: [2,10):1, [5,11):1, [3,11):1.
+    # summed per region: [2,3)=1, [3,5)=2, [5,10)=3, [10,11)=2.
+    expected = _ct(
+        [(_T(2.0, 3.0, 5.0, 10.0), _T(3.0, 5.0, 10.0, 11.0))],
+        _T(1.0, 2.0, 3.0, 2.0),
+        ["[)"],
+    )
+    assert_ceinsum(out, expected, "ij,i->i coalesce")
 
 
 @requires_ceinsum

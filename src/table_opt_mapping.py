@@ -333,6 +333,110 @@ def _detect_lead(pair_conds: list[_Cond], axis_a: str, axis_b: str) -> _Lead | N
 
 
 # ---------------------------------------------------------------------------
+# Composite-equality lead: when two or more pure equalities couple the leading
+# pair (e.g. ``A_i==B_i AND A_j==B_j``), a single-equality lead matches only one
+# coordinate and floods the post-filter with candidates (∏ of per-axis hits).
+# Packing all the equalities into ONE injective key per side turns the lead into
+# a single exact equality whose candidate set ≈ the final result — slashing the
+# intermediate the kernel's scatter/post-filter must move.
+#
+# Keys are built at BUILD time (operand tensors are fixed there) via per-pair
+# joint factorization: concatenating A's and B's values for a pair and taking
+# ``torch.unique(..., return_inverse=True)`` assigns equal codes iff the values
+# are equal, so the packed key is equal iff every equality holds — i.e. exact,
+# so the lead may drop all consumed predicates with no post-filter recheck.
+# ---------------------------------------------------------------------------
+
+_COMPOSITE_KEY_A = "__composite_key_a__"
+_COMPOSITE_KEY_B = "__composite_key_b__"
+
+
+def _detect_composite_eq_lead(
+    pair_conds: list[_Cond], axis_a: str, axis_b: str
+) -> list[tuple[int, str, str]] | None:
+    """Return ``[(cond_idx, a_tensor, b_tensor), ...]`` for the pure equalities
+    between the leading pair, or ``None`` if fewer than two exist (a single
+    equality is already handled exactly by the normal ``eq`` lead)."""
+    eqs: list[tuple[int, str, str]] = []
+    for i, c in enumerate(pair_conds):
+        d = _try_eq(c, axis_a, axis_b)
+        if d is not None:
+            eqs.append((i, d["a_tensor"], d["b_tensor"]))
+    return eqs if len(eqs) >= 2 else None
+
+
+def _build_composite_eq_keys(
+    op: Mapping[str, torch.Tensor], eqs: list[tuple[int, str, str]]
+) -> tuple[torch.Tensor, torch.Tensor, bool, bool] | None:
+    """Pack the equality columns into one ``int32`` key per side.
+
+    Returns ``(key_a, key_b, overlap_a, overlap_b)`` where the overlap flags say
+    whether that side's key has duplicates (drives the kernel's write-path
+    dispatch). Returns ``None`` if the packed key space would meet or exceed the
+    intersection kernel's ``int32`` sentinel range (``2**31 - 1``), in which case
+    the caller falls back to the single-equality lead.
+    """
+    a0, b0 = eqs[0][1], eqs[0][2]
+    nA, nB = op[a0].shape[0], op[b0].shape[0]
+    dev = op[a0].device
+
+    a_codes: list[torch.Tensor] = []
+    b_codes: list[torch.Tensor] = []
+    ncodes: list[int] = []
+    for _, at, bt in eqs:
+        cat = torch.cat([op[at], op[bt]])
+        uniq, inv = torch.unique(cat, sorted=True, return_inverse=True)
+        a_codes.append(inv[:nA].to(torch.int64))
+        b_codes.append(inv[nA:].to(torch.int64))
+        ncodes.append(int(uniq.numel()))
+
+    space = 1
+    for n in ncodes:
+        space *= n
+    if space >= 2**31 - 1:  # would break the kernel's int32 OOB sentinel
+        return None
+
+    key_a = torch.zeros(nA, dtype=torch.int64, device=dev)
+    key_b = torch.zeros(nB, dtype=torch.int64, device=dev)
+    mult = 1
+    for k in range(len(eqs) - 1, -1, -1):
+        key_a += a_codes[k] * mult
+        key_b += b_codes[k] * mult
+        mult *= ncodes[k]
+    key_a = key_a.to(torch.int32)
+    key_b = key_b.to(torch.int32)
+    overlap_a = int(torch.unique(key_a).numel()) != nA
+    overlap_b = int(torch.unique(key_b).numel()) != nB
+    return key_a, key_b, overlap_a, overlap_b
+
+
+def _make_composite_eq_lead(
+    op: Mapping[str, torch.Tensor],
+    pair_conds: list[_Cond],
+    axis_a: str,
+    axis_b: str,
+) -> tuple[_Lead, dict[str, torch.Tensor], bool, bool] | None:
+    """If a composite-equality lead applies, build the packed keys and return
+    ``(lead, op_ext, overlap_a, overlap_b)``: an ``eq`` lead over the synthetic
+    key tensors, the operand map extended with those keys, and the per-side
+    duplicate flags. ``None`` if not applicable (fall back to ``_detect_lead``)."""
+    eqs = _detect_composite_eq_lead(pair_conds, axis_a, axis_b)
+    if eqs is None:
+        return None
+    built = _build_composite_eq_keys(op, eqs)
+    if built is None:
+        return None
+    key_a, key_b, overlap_a, overlap_b = built
+    op_ext = {**op, _COMPOSITE_KEY_A: key_a, _COMPOSITE_KEY_B: key_b}
+    lead = _Lead(
+        "eq",
+        tuple(i for i, _, _ in eqs),
+        {"a_tensor": _COMPOSITE_KEY_A, "b_tensor": _COMPOSITE_KEY_B},
+    )
+    return lead, op_ext, overlap_a, overlap_b
+
+
+# ---------------------------------------------------------------------------
 # 3-axis batched band lead: ``r[b] OP a_tensor[a] + c_tensor[c]`` paired with
 # the symmetric upper bound. Used by point-cloud-style cases where the band's
 # endpoints combine an axis-a tensor (e.g. mask center) with an axis-c tensor
@@ -681,7 +785,15 @@ def build_table_opt_mapping(
     # fall back to a 3-axis batched band when no 2-axis lead is feasible —
     # that's the case when every condition couples all three axes at once
     # (point-cloud-style cases).
-    lead = _detect_lead(pair_conds, axis_a, axis_b) if pair_conds else None
+    # Prefer a composite-equality lead (≥2 equalities packed into one exact key)
+    # over the single-equality lead it would otherwise pick — same result, far
+    # fewer intermediate candidates.
+    lead: _Lead | None = None
+    composite = _make_composite_eq_lead(op, pair_conds, axis_a, axis_b) if pair_conds else None
+    if composite is not None:
+        lead, op, _, _ = composite
+    if lead is None:
+        lead = _detect_lead(pair_conds, axis_a, axis_b) if pair_conds else None
     three_axis_lead: _Lead | None = None
     if lead is None and axis_c is not None:
         three_axis_lead = _detect_three_axis_band_lead(c_conds, axis_a, axis_b, axis_c)
