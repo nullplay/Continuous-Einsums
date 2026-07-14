@@ -15,9 +15,9 @@ mask → product → merge strategy of the thesis chapter, one module per step:
    coordinates (max of starts / min of ends through the mask positions).
 3. :func:`ceinsum_merge.merge_discrete`         — **merge, discrete half**:
    sum candidates with identical output coordinates (unique + scatter-add).
-   :func:`ceinsum_coalesce.coalesce` — **merge, continuous half**: when a
-   reduction leaves output pieces that *partially* overlap, cut them into
-   disjoint pieces and sum per region.
+   :func:`ceinsum_merge.coalesce` — **merge, continuous half**: when a
+   reduction leaves output pieces that *partially* overlap, a sweep-line cuts
+   them at their breakpoints into disjoint pieces and sums per region.
 
 Example::
 
@@ -29,10 +29,9 @@ Example::
 
 from __future__ import annotations
 
-from ceinsum_coalesce import coalesce
 from ceinsum_equation import parse_equation
 from ceinsum_mask import MaskBuilder, build_mask
-from ceinsum_merge import merge_discrete
+from ceinsum_merge import coalesce, merge_discrete
 from ceinsum_product import compute_output_properties, compute_product
 from ctensor import ContinuousTensor, continuous_tensor
 
