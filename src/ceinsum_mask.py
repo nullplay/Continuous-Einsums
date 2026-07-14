@@ -17,7 +17,8 @@ builder* — the manuscript's three strategies:
   side and ``torch.searchsorted`` the other; log-linear.
 * :func:`mask_dense.build_dense_mask` — the naive all-pair broadcast
   comparison; quadratic but branch-free and fast on small operands.
-* a database join (e.g. polars ``join_where``) shares the same signature.
+* :func:`mask_db_join.build_db_join_mask` — the conditions handed to a
+  database library (polars ``join_where``) as an inequality join.
 
 **Integral semantics.** When the einsum *reduces* over an index whose carriers
 are all intervals, the sum over that index is an integral, and the mask entry

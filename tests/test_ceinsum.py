@@ -399,18 +399,34 @@ def test_ij_i__i_interval_j_single_carrier_integral():
     assert_ceinsum(out, expected, "ij,i->i integral")
 
 
-@requires_ceinsum
-def test_builder_equivalence_on_integral_case():
-    """The dense and binary-search mask builders agree on the MV path."""
-    from mask_dense import build_dense_mask
-
+def _integral_case_operands():
     A = _ct(
         [(_T(0.0, 3.0), _T(2.0, 5.0)), (_T(1.0, 0.0), _T(4.0, 6.0))],
         _T(2.0, 3.0),
         ["[)", "[)"],
     )
     B = _ct([(_T(0.0, 2.0), _T(1.0, 5.0))], _T(10.0, 20.0), ["[)"])
+    return A, B
 
+
+@requires_ceinsum
+def test_builder_equivalence_on_integral_case():
+    """The dense and binary-search mask builders agree on the MV path."""
+    from mask_dense import build_dense_mask
+
+    A, B = _integral_case_operands()
     out_default = ceinsum("ik,k->i", A, B)
     out_dense = ceinsum("ik,k->i", A, B, builder=build_dense_mask)
-    assert_ceinsum(out_dense, out_default, "builder equivalence")
+    assert_ceinsum(out_dense, out_default, "builder equivalence (dense)")
+
+
+@requires_ceinsum
+def test_db_join_builder_equivalence_on_integral_case():
+    """The polars database-join builder agrees on the MV path."""
+    pytest.importorskip("polars")
+    from mask_db_join import build_db_join_mask
+
+    A, B = _integral_case_operands()
+    out_default = ceinsum("ik,k->i", A, B)
+    out_db = ceinsum("ik,k->i", A, B, builder=build_db_join_mask)
+    assert_ceinsum(out_db, out_default, "builder equivalence (db join)")

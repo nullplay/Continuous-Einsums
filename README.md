@@ -19,9 +19,9 @@ the thesis chapter:
    scatter-add), then coalesce partially overlapping output intervals with a
    sweep-line (1-D) or per-dimension cutting + discrete merge (N-D).
 
-Mask creation is pluggable; two strategies are implemented (dense broadcast
-comparison and binary search via `torch.searchsorted`), and the mapping test
-suite additionally benchmarks a Polars database-join formulation.
+Mask creation is pluggable, with the chapter's three strategies implemented:
+dense broadcast comparison, binary search via `torch.searchsorted` (the
+default), and a Polars database join.
 
 ## Layout
 
@@ -35,6 +35,7 @@ src/
   ceinsum_merge.py       discrete merge + sweep-line / cut-then-merge coalesce
   mask_dense.py          mask builder: brute-force N-D boolean table
   mask_binary_search.py  mask builder: searchsorted lead + post-filter
+  mask_db_join.py        mask builder: polars database join (optional dep)
   table_ceinsum.py       dense interaction-table einsum (thesis-chapter
                          specification reference; same integral semantics)
   synth_dataset.py       non-overlapping ND box generator for tests
