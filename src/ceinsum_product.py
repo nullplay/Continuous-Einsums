@@ -1,0 +1,129 @@
+"""Step 2 — product: per-tuple candidate values and output coordinates.
+
+For every mask entry (join tuple) this step materializes one *candidate*
+output contribution:
+
+* its value ``Prod_t = MV_t · ∏_op values_op[piece_idx_op[t]]`` — the plain
+  product of the participating pieces' values, times the mask's integral
+  measure (the intersection lengths of the reduced interval indices);
+* its output coordinates — per output index, the *intersection* of the
+  carriers' coordinates: ``max`` of the gathered starts and ``min`` of the
+  gathered ends for intervals, or a plain copy from any pinpoint carrier
+  (the mask's equality conditions guarantee all pinpoint carriers agree).
+
+Everything is a gather through the mask's piece columns followed by
+elementwise maximum/minimum/multiply — an indirect einsum. Candidates are not
+deduplicated here; tuples landing on the same output piece are the terms of
+the contraction sum, merged by :func:`ceinsum_merge.merge_discrete`.
+
+This module also derives the output tensor's per-index property codes, which
+decide the coordinate layout (pinpoint vs interval) used above.
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple, Sequence
+
+import torch
+
+from ceinsum_mask import Mask
+from ctensor import PINPOINT, ContinuousTensor, is_pinpoint, left_closed, right_closed
+
+
+class Product(NamedTuple):
+    """Per-tuple candidates, all of length ``P`` (the mask's entry count).
+
+    * ``values`` — candidate value per join tuple.
+    * ``coords`` — one coord spec per output index, in order: ``(coord,)``
+      for a pinpoint index, ``(start, end)`` for an interval index.
+    * ``key_cols`` — the piece columns of the operands that *provide* an
+      output index. Tuples agreeing on all key columns share their output
+      coordinates and belong to the same output piece; empty for a scalar
+      output.
+    """
+
+    values: torch.Tensor
+    coords: list[tuple[torch.Tensor, ...]]
+    key_cols: tuple[torch.Tensor, ...]
+
+
+def compute_output_properties(
+    operands: Sequence[ContinuousTensor],
+    index_to_operand_dims: dict[str, list[tuple[int, int]]],
+    out_indices: str,
+) -> dict[str, str]:
+    """Derive each *output* index's property from the operand dims that carry it.
+
+    Intersecting pieces along a shared index combines their boundary kinds
+    *conservatively*, boundary-by-boundary:
+
+    * if **any** contributing dim is a pinpoint, the output index is a pinpoint
+      (the point pins the coordinate regardless of the other intervals);
+    * otherwise the output is an interval that is left-closed iff **every**
+      contributing dim is left-closed, and right-closed iff **every**
+      contributing dim is right-closed. (A single open boundary anywhere opens
+      that side of the intersection.)
+    """
+    total: dict[str, str] = {}
+    for index in out_indices:
+        op_dims = index_to_operand_dims[index]
+        properties = [operands[op].property[dim] for (op, dim) in op_dims]
+
+        if PINPOINT in properties:
+            total[index] = PINPOINT
+            continue
+
+        lc = all(left_closed(p) for p in properties)
+        rc = all(right_closed(p) for p in properties)
+        total[index] = ("[" if lc else "(") + ("]" if rc else ")")
+
+    return total
+
+
+def compute_product(
+    operands: Sequence[ContinuousTensor],
+    mask: Mask,
+    index_to_operand_dims: dict[str, list[tuple[int, int]]],
+    out_indices: str,
+    index_properties: dict[str, str],
+) -> Product:
+    """Build the per-tuple candidate values, coordinates, and grouping key."""
+    piece_idx = mask.piece_idx
+
+    # Value: gather every operand's values through its mask column, multiply,
+    # and weight by the mask's integral measure.
+    values = operands[0].values[piece_idx[0]]
+    for op in range(1, len(operands)):
+        values = values * operands[op].values[piece_idx[op]]
+    if mask.values is not None:
+        values = values * mask.values
+
+    # Coordinates: intersect the carriers of each output index per tuple.
+    coords: list[tuple[torch.Tensor, ...]] = []
+    for oi in out_indices:
+        occ = index_to_operand_dims[oi]
+        if index_properties[oi] == PINPOINT:
+            # Coordinate comes from any pinpoint carrier (equality conditions
+            # guarantee all pinpoint carriers agree).
+            coord = next(
+                operands[op].dims[dim][0][piece_idx[op]]
+                for (op, dim) in occ
+                if is_pinpoint(operands[op].property[dim])
+            )
+            coords.append((coord,))
+        else:
+            starts = torch.stack(
+                [operands[op].dims[dim][0][piece_idx[op]] for (op, dim) in occ], dim=0
+            )
+            ends = torch.stack(
+                [operands[op].dims[dim][1][piece_idx[op]] for (op, dim) in occ], dim=0
+            )
+            coords.append((starts.amax(0), ends.amin(0)))
+
+    # Grouping key: the piece columns of the output-providing operands.
+    provider_ops = sorted(
+        {op for oi in out_indices for (op, _d) in index_to_operand_dims[oi]}
+    )
+    key_cols = tuple(piece_idx[op] for op in provider_ops)
+
+    return Product(values, coords, key_cols)

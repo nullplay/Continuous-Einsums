@@ -1,17 +1,23 @@
 """Continuous einsum: public API.
 
 This module is the thin orchestrator for the continuous-einsum pipeline. The
-data model lives in :mod:`ctensor`; each pipeline step is implemented in its own
-module and exposed as one high-level function, which :func:`ceinsum` calls in
-order:
+data model lives in :mod:`ctensor`; the evaluation follows the format-aware
+mask → product → merge strategy of the thesis chapter, one module per step:
 
-0. :func:`ceinsum_equation.parse_equation`        — parse the einsum string.
-1. :func:`ceinsum_properties.compute_output_properties` — per-index output property.
-2. :func:`ceinsum_mapping.run_mapping`            — join the operands' pieces.
-3. :func:`ceinsum_output.build_output_pieces`     — group join tuples into pieces.
-4. :func:`ceinsum_coordinates.compute_output_coordinates` — intersect coordinates.
-5. :func:`ceinsum_values.compute_output_values`   — gather → multiply → scatter-add.
-6. :func:`ceinsum_coalesce.coalesce`              — split overlaps, sum into disjoint pieces.
+0. :func:`ceinsum_equation.parse_equation`      — parse the einsum string.
+1. :func:`ceinsum_mask.build_mask`              — **mask creation**: a sparse
+   COO mask over the operands' piece positions; entry (a, b, ...) exists iff
+   the pieces intersect on every shared index. Its value array carries the
+   intersection *lengths* of the reduced all-interval indices, so contracting
+   a continuous variable computes the integral ``∫ A·B dk``.
+2. :func:`ceinsum_product.compute_product`      — **product**: per mask entry,
+   the candidate value (operand values × mask measure) and its output
+   coordinates (max of starts / min of ends through the mask positions).
+3. :func:`ceinsum_merge.merge_discrete`         — **merge, discrete half**:
+   sum candidates with identical output coordinates (unique + scatter-add).
+   :func:`ceinsum_coalesce.coalesce` — **merge, continuous half**: when a
+   reduction leaves output pieces that *partially* overlap, cut them into
+   disjoint pieces and sum per region.
 
 Example::
 
@@ -24,12 +30,10 @@ Example::
 from __future__ import annotations
 
 from ceinsum_coalesce import coalesce
-from ceinsum_coordinates import compute_output_coordinates
 from ceinsum_equation import parse_equation
 from ceinsum_mask import MaskBuilder, build_mask
-from ceinsum_output import build_output_pieces
-from ceinsum_properties import compute_output_properties
-from ceinsum_values import compute_output_values
+from ceinsum_merge import merge_discrete
+from ceinsum_product import compute_output_properties, compute_product
 from ctensor import ContinuousTensor, continuous_tensor
 
 __all__ = ["ContinuousTensor", "continuous_tensor", "ceinsum"]
@@ -42,11 +46,13 @@ def ceinsum(
 ) -> ContinuousTensor:
     """Continuous einsum over COO continuous tensors.
 
-    Runs the four-step pipeline (see module docstring) by calling each step's
-    high-level function in turn. Supports 1-, 2-, and 3-operand equations.
+    Runs the mask → product → merge pipeline (see module docstring). Supports
+    1-, 2-, and 3-operand equations. Contraction over an index whose carriers
+    are all intervals integrates (measure-weighted); any pinpoint carrier
+    makes it a plain sum.
 
-    ``builder`` chooses the piece-join implementation passed to step 2: the
-    optimized searchsorted builder (default, ``None``) or the naive all-pair
+    ``builder`` chooses the mask-creation strategy passed to step 1: the
+    binary-search builder (default, ``None``) or the naive all-pair
     ``mask_dense.build_dense_mask``.
 
     Worked example (the same operands as ``tests/test_ceinsum.py::test_ij_i_j__i``)::
@@ -73,48 +79,39 @@ def ceinsum(
     # are already disjoint, so we skip the step entirely.
     has_reduction = bool(set("".join(in_indices)) - set(out_indices))
 
-    # 1) Output property per output index.
+    # Output property per output index.
     # eg: i is interval in t1 ("[)") and t2 ("[]") → conservative AND → {"i": "[)"}
     index_properties = compute_output_properties(
         operands, index_to_operand_dims, out_indices
     )
+    out_property = tuple(index_properties[oi] for oi in out_indices)
 
-    # 2) Mask: join the operands' pieces under intersection conditions.
+    # 1) Mask: join the operands' pieces under intersection conditions.
     # eg: 2 surviving join tuples (t1.0,t2.0,t3.0) and (t1.1,t2.0,t3.1) →
     #     piece_idx = ([0,1], [0,0], [0,1])   # one column per operand
     #     (i: [0,2)∩[1,4] and [1,3)∩[1,4];  j: 0.5∈[0,1) and 5.5∈[5,6))
-    # mask.values carries the integral measure of reduced interval indices.
+    # mask.values carries the integral measure of reduced interval indices
+    # (None here: the reduced j has a pinpoint carrier, so it plainly sums).
     mask = build_mask(operands, index_to_operand_dims, out_indices, builder)
-    piece_idx = mask.piece_idx
 
-    # 3) Output construction: group join tuples into output pieces.
-    # eg: i is provided by t1 & t2; their piece pairs (0,0),(1,0) are distinct →
-    #     num_out=2, inv=[0,1], rep=[0,1]
-    inv, num_out, rep = build_output_pieces(
-        piece_idx, index_to_operand_dims, out_indices
+    # 2) Product: per-tuple candidate values and output coordinates.
+    # eg: values = [2,3]·[10,10]·[100,200] = [2000,6000]
+    #     i coords: start=max(t1.s,t2.s)=[1,1], end=min(t1.e,t2.e)=[2,3]
+    #     key_cols = (t1 col, t2 col) — the operands providing i
+    product = compute_product(
+        operands, mask, index_to_operand_dims, out_indices, index_properties
     )
 
-    # 4) Output coordinates: intersect the contributing pieces per index.
-    # eg: i start=max(t1.start,t2.start)=[1,1], end=min(t1.end,t2.end)=[2,3]
-    #     → out_dims=[([1,1], [2,3])], out_property=("[)",)
-    out_dims = compute_output_coordinates(
-        operands, piece_idx, index_to_operand_dims, out_indices, index_properties, rep
-    )
-    out_property = tuple(index_properties[oi] for oi in out_indices)
+    # 3) Merge, discrete half: sum candidates sharing their output coordinates.
+    # eg: provider piece pairs (0,0),(1,0) are distinct → two output pieces,
+    #     ContinuousTensor(dims=(([1,1],[2,3]),), values=[2000,6000], ("[)",))
+    out = merge_discrete(product, out_property)
 
-    # 5) Values: product across operands per join tuple (times the mask's
-    # integral measure), scatter-added per piece.
-    # eg: [2,3]·[10,10]·[100,200] = [2000,6000], scatter-add by inv → [2000,6000]
-    out_values = compute_output_values(operands, piece_idx, inv, num_out, mask.values)
-
-    # eg: ContinuousTensor(dims=(([1,1],[2,3]),), values=[2000,6000], property=("[)",))
-    out = ContinuousTensor(tuple(out_dims), out_values, out_property)
-
-    # 6) Coalesce: contracting an interleaved index can leave output pieces that
-    # overlap along an output dim (e.g. pinpoint j in "ij,i->i"). Rewrite them
-    # into a disjoint set, summing values where they overlapped. Only a reduction
-    # can produce such overlaps, and coalesce is itself a no-op when the pieces
-    # are already disjoint.
+    # Merge, continuous half: contracting an interleaved index can leave output
+    # pieces that *partially* overlap along an output dim (e.g. pinpoint j in
+    # "ij,i->i"). Rewrite them into a disjoint set, summing values where they
+    # overlapped. Only a reduction can produce such overlaps, and coalesce is
+    # itself a no-op when the pieces are already disjoint.
     if has_reduction:
         out = coalesce(out)
     return out
