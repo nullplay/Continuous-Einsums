@@ -17,8 +17,11 @@ Semantics being pinned down (see continuous_einsum module docstring):
   provider is a pinpoint the output index is a pinpoint and the coord is copied.
 * Output dim property: pinpoint if any provider is a pinpoint; else interval,
   left-closed iff all providers left-closed, right-closed iff all right-closed.
-* Output value: plain product of matched operands' values, scatter-added per
-  output piece (no length/measure weighting).
+* Output value: product of matched operands' values times the mask's integral
+  measure, scatter-added per output piece. A reduced index whose carriers are
+  all intervals integrates: each join tuple is weighted by the intersection
+  length on that index (``∫ A·B dk``). A reduced index with any pinpoint
+  carrier contracts by plain summation (no factor).
 
 These call the real ``ceinsum`` and so are skipped until it is implemented.
 """
@@ -303,3 +306,111 @@ def test_i_i_i__i_three_providers_property():
     # left closed: all left-closed → "[" ; right closed: c is open → ")".
     expected = _ct([(_T(2.0), _T(8.0))], _T(30.0), ["[)"])
     assert_ceinsum(out, expected, "i,i,i->i property")
+
+
+# ===========================================================================
+# Integral semantics — the manuscript's worked examples and reduced-interval
+# variables (mask value = intersection length, so contraction integrates).
+# ===========================================================================
+
+
+@requires_ceinsum
+def test_manuscript_example1_pointwise_2d():
+    """ij,ij->ij — manuscript Example 1: one output piece per intersecting
+    pair of boxes; a1 and b1 do not intersect."""
+    A = _ct(
+        [(_T(0.0, 3.0), _T(2.0, 5.0)),   # i: [0,2), [3,5)
+         (_T(0.0, 1.0), _T(2.0, 4.0))],  # j: [0,2), [1,4)
+        _T(2.0, 3.0),
+        ["[)", "[)"],
+    )
+    B = _ct(
+        [(_T(1.0, 0.0), _T(4.0, 1.0)),   # i: [1,4), [0,1)
+         (_T(1.0, 0.0), _T(3.0, 2.0))],  # j: [1,3), [0,2)
+        _T(10.0, 20.0),
+        ["[)", "[)"],
+    )
+
+    out = ceinsum("ij,ij->ij", A, B)
+
+    # (a0,b0): [1,2)x[1,2):20  (a0,b1): [0,1)x[0,2):40  (a1,b0): [3,4)x[1,3):30
+    expected = _ct(
+        [(_T(1.0, 0.0, 3.0), _T(2.0, 1.0, 4.0)),
+         (_T(1.0, 0.0, 1.0), _T(2.0, 2.0, 3.0))],
+        _T(20.0, 40.0, 30.0),
+        ["[)", "[)"],
+    )
+    assert_ceinsum(out, expected, "manuscript ex1")
+
+
+@requires_ceinsum
+def test_manuscript_example2_integral():
+    """ik,k->i — manuscript Example 2: C_i = ∫_k A_ik·B_k dk. The reduced k is
+    all-interval, so each join tuple is weighted by its k-overlap length."""
+    A = _ct(
+        [(_T(0.0, 3.0), _T(2.0, 5.0)),   # i: [0,2), [3,5)
+         (_T(1.0, 0.0), _T(4.0, 6.0))],  # k: [1,4), [0,6)
+        _T(2.0, 3.0),
+        ["[)", "[)"],
+    )
+    B = _ct([(_T(0.0, 2.0), _T(1.0, 5.0))], _T(10.0, 20.0), ["[)"])  # k: [0,1), [2,5)
+
+    out = ceinsum("ik,k->i", A, B)
+
+    # (a0,b0): k [1,4)∩[0,1)=∅. (a0,b1): len([2,4))=2 → 2·20·2=80 on [0,2).
+    # (a1,b0): len([0,1))=1 → 3·10·1=30 ; (a1,b1): len([2,5))=3 → 3·20·3=180;
+    # both on i=[3,5) → 210.
+    expected = _ct([(_T(0.0, 3.0), _T(2.0, 5.0))], _T(80.0, 210.0), ["[)"])
+    assert_ceinsum(out, expected, "manuscript ex2")
+
+
+@requires_ceinsum
+def test_ij__i_single_operand_integral_coalesce():
+    """ij->i — a single operand integrates over its own j extent; the
+    overlapping i pieces are then coalesced."""
+    A = _ct(
+        [(_T(0.0, 1.0), _T(2.0, 3.0)),   # i: [0,2), [1,3)
+         (_T(0.0, 1.0), _T(3.0, 4.0))],  # j: [0,3), [1,4)
+        _T(2.0, 5.0),
+        ["[)", "[)"],
+    )
+
+    out = ceinsum("ij->i", A)
+
+    # piece0: 2·len([0,3))=6 on [0,2); piece1: 5·len([1,4))=15 on [1,3).
+    # coalesced: [0,1):6, [1,2):21, [2,3):15.
+    expected = _ct(
+        [(_T(0.0, 1.0, 2.0), _T(1.0, 2.0, 3.0))], _T(6.0, 21.0, 15.0), ["[)"]
+    )
+    assert_ceinsum(out, expected, "ij->i integral")
+
+
+@requires_ceinsum
+def test_ij_i__i_interval_j_single_carrier_integral():
+    """ij,i->i — the reduced interval j is carried by one operand inside a
+    join: its measure is that piece's own j length."""
+    A = _ct([(_T(0.0), _T(4.0)), (_T(0.0), _T(2.0))], _T(2.0), ["[)", "[)"])
+    B = _ct([(_T(1.0), _T(3.0))], _T(10.0), ["[)"])
+
+    out = ceinsum("ij,i->i", A, B)
+
+    # i: [0,4)∩[1,3)=[1,3); MV = len(j=[0,2)) = 2 → 2·10·2 = 40.
+    expected = _ct([(_T(1.0), _T(3.0))], _T(40.0), ["[)"])
+    assert_ceinsum(out, expected, "ij,i->i integral")
+
+
+@requires_ceinsum
+def test_builder_equivalence_on_integral_case():
+    """The dense and binary-search mask builders agree on the MV path."""
+    from mask_dense import build_dense_mask
+
+    A = _ct(
+        [(_T(0.0, 3.0), _T(2.0, 5.0)), (_T(1.0, 0.0), _T(4.0, 6.0))],
+        _T(2.0, 3.0),
+        ["[)", "[)"],
+    )
+    B = _ct([(_T(0.0, 2.0), _T(1.0, 5.0))], _T(10.0, 20.0), ["[)"])
+
+    out_default = ceinsum("ik,k->i", A, B)
+    out_dense = ceinsum("ik,k->i", A, B, builder=build_dense_mask)
+    assert_ceinsum(out_dense, out_default, "builder equivalence")

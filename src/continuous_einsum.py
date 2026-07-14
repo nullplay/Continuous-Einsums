@@ -26,7 +26,7 @@ from __future__ import annotations
 from ceinsum_coalesce import coalesce
 from ceinsum_coordinates import compute_output_coordinates
 from ceinsum_equation import parse_equation
-from ceinsum_mapping import MappingBuilder, run_mapping
+from ceinsum_mask import MaskBuilder, build_mask
 from ceinsum_output import build_output_pieces
 from ceinsum_properties import compute_output_properties
 from ceinsum_values import compute_output_values
@@ -38,7 +38,7 @@ __all__ = ["ContinuousTensor", "continuous_tensor", "ceinsum"]
 def ceinsum(
     equation: str,
     *operands: ContinuousTensor,
-    builder: MappingBuilder | None = None,
+    builder: MaskBuilder | None = None,
 ) -> ContinuousTensor:
     """Continuous einsum over COO continuous tensors.
 
@@ -79,11 +79,13 @@ def ceinsum(
         operands, index_to_operand_dims, out_indices
     )
 
-    # 2) Mapping: join the operands' pieces under intersection conditions.
+    # 2) Mask: join the operands' pieces under intersection conditions.
     # eg: 2 surviving join tuples (t1.0,t2.0,t3.0) and (t1.1,t2.0,t3.1) →
     #     piece_idx = ([0,1], [0,0], [0,1])   # one column per operand
     #     (i: [0,2)∩[1,4] and [1,3)∩[1,4];  j: 0.5∈[0,1) and 5.5∈[5,6))
-    piece_idx = run_mapping(operands, index_to_operand_dims, builder)
+    # mask.values carries the integral measure of reduced interval indices.
+    mask = build_mask(operands, index_to_operand_dims, out_indices, builder)
+    piece_idx = mask.piece_idx
 
     # 3) Output construction: group join tuples into output pieces.
     # eg: i is provided by t1 & t2; their piece pairs (0,0),(1,0) are distinct →
@@ -100,9 +102,10 @@ def ceinsum(
     )
     out_property = tuple(index_properties[oi] for oi in out_indices)
 
-    # 5) Values: product across operands per join tuple, scatter-added per piece.
+    # 5) Values: product across operands per join tuple (times the mask's
+    # integral measure), scatter-added per piece.
     # eg: [2,3]·[10,10]·[100,200] = [2000,6000], scatter-add by inv → [2000,6000]
-    out_values = compute_output_values(operands, piece_idx, inv, num_out)
+    out_values = compute_output_values(operands, piece_idx, inv, num_out, mask.values)
 
     # eg: ContinuousTensor(dims=(([1,1],[2,3]),), values=[2000,6000], property=("[)",))
     out = ContinuousTensor(tuple(out_dims), out_values, out_property)

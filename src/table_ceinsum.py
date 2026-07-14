@@ -20,12 +20,12 @@ Interaction Tables" section):
    the candidate axes; :meth:`GridResult.to_coo` flattens it to a COO piece
    list.
 
-Differences from :func:`continuous_einsum.ceinsum`: this implementation
-integrates over all-interval contracted variables (measure weighting), keeps
-explicit zero output pieces (shapes depend only on the input coordinates),
-and supports only half-open ``"[)"`` intervals and ``"P"`` pinpoints. It
-materializes the full dense table, so it is a specification-level reference,
-not an optimized path.
+Differences from :func:`continuous_einsum.ceinsum`: the two share integral
+semantics (a contracted variable whose carriers are all intervals is
+measure-weighted), but this implementation keeps explicit zero output pieces
+(shapes depend only on the input coordinates) and supports only half-open
+``"[)"`` intervals and ``"P"`` pinpoints. It materializes the full dense
+table, so it is a specification-level reference, not an optimized path.
 """
 
 from __future__ import annotations

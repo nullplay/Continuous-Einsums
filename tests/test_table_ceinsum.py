@@ -4,9 +4,11 @@ Covers, in order:
 
 * the thesis chapter's two worked examples, pinned to their exact grids;
 * pointwise agreement with the ground-truth product of operand evaluations
-  (and with the existing ``ceinsum`` pipeline) on equations where the two
-  implementations share semantics — i.e. no all-interval contraction;
-* a brute-force loop reference for the integrated case (``ik,kj->ij``);
+  and with the ``ceinsum`` pipeline (the two now share integral semantics:
+  a reduced all-interval index weights each contribution by its overlap
+  length);
+* a brute-force loop reference for the integrated case (``ik,kj->ij``),
+  which ``ceinsum`` must also match pointwise;
 * structural properties: output dimension types, explicit zeros kept,
   unsupported brackets rejected.
 """
@@ -230,6 +232,15 @@ def test_integrated_matmul_vs_brute_force():
     res = table_ceinsum("ik,kj->ij", A, B)
     assert torch.allclose(res.grid, _brute_force_ik_kj(A, B), atol=1e-9)
 
+    # ceinsum shares the integral semantics: compare pointwise at every
+    # (i level, j cell midpoint).
+    out_c = ceinsum("ik,kj->ij", A, B)
+    out_t = res.to_coo()
+    pts_j = torch.unique(torch.cat([B.dims[1][0], B.dims[1][1]]))
+    mid_j = (pts_j[:-1] + pts_j[1:]) / 2
+    pts = torch.cartesian_prod(torch.unique(A.dims[0][0]), mid_j)
+    assert torch.allclose(_eval_at(out_c, pts), _eval_at(out_t, pts), atol=1e-9)
+
 
 def test_single_operand_interval_reduction():
     """ij->i with j interval: integrate each piece over its own j extent."""
@@ -241,6 +252,11 @@ def test_single_operand_interval_reduction():
     res = table_ceinsum("ij->i", A)
     # cells of i: [0,1) [1,2) [2,3); weights: piece0 j-length 3, piece1 j-length 3
     assert torch.allclose(res.grid, _T(2 * 3, 2 * 3 + 5 * 3, 5 * 3))
+
+    # ceinsum agrees on the single-operand integral.
+    out_c = ceinsum("ij->i", A)
+    pts = _probe_points_1d(_ct([A.dims[0]], A.values, ["[)"]))
+    assert torch.allclose(_eval_at(out_c, pts), _eval_at(res.to_coo(), pts), atol=1e-9)
 
 
 # ---------------------------------------------------------------------------
