@@ -3,7 +3,7 @@
 Three cases, matching the thesis chapter:
 
 1. ``i,i->i``   both interval           — vs the existing ``ceinsum`` pipeline
-2. ``ij,j->i``  interval i, pinpoint j  — vs ``ceinsum`` (mask + coalesce path)
+2. ``ij,j->i``  interval i, pinpoint j  — vs ``ceinsum`` (mask + merge path)
 3. ``ik,kj->ij`` A:(P,I), B:(I,I)       — vs ``ceinsum`` (integrated k: both
                                           weight by the k-overlap length)
 

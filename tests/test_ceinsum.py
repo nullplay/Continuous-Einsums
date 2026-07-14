@@ -170,7 +170,7 @@ def test_ij_i_j__i():
     # (t1.0,t2.0): [0,2)∩[1,4)=[1,2), v=2*10*100=2000
     # (t1.1,t2.0): [1,3)∩[1,4)=[1,3), v=3*10*200=6000
     # j is contracted, so these two overlapping i-pieces are summed where they
-    # overlap (coalesce step): [1,2)→2000+6000=8000, [2,3)→6000.
+    # overlap (merge step): [1,2)→2000+6000=8000, [2,3)→6000.
     expected = _ct([(_T(1.0, 2.0), _T(2.0, 3.0))], _T(8000.0, 6000.0), ["[)"])
     assert_ceinsum(out, expected, "ij,i,j->i")
 
@@ -195,9 +195,9 @@ def test_ij_j__i_reduction_scatter_add():
 
 
 @requires_ceinsum
-def test_ij_i__i_coalesce_overlapping_reduction():
+def test_ij_i__i_merge_overlapping_reduction():
     """ij,i->i — contracting pinpoint j leaves overlapping i-pieces that the
-    coalesce step splits at every boundary and sums per region."""
+    merge step splits at every boundary and sums per region."""
     t1 = _ct(
         [(_T(0.0, 5.0, 3.0), _T(10.0, 15.0, 13.0)),  # i: [0,10), [5,15), [3,13)
          (_T(0.0, 1.0, 2.0),)],                       # j pinpoints: 0, 1, 2
@@ -215,7 +215,7 @@ def test_ij_i__i_coalesce_overlapping_reduction():
         _T(1.0, 2.0, 3.0, 2.0),
         ["[)"],
     )
-    assert_ceinsum(out, expected, "ij,i->i coalesce")
+    assert_ceinsum(out, expected, "ij,i->i merge")
 
 
 @requires_ceinsum
@@ -372,9 +372,9 @@ def test_manuscript_example2_integral():
 
 
 @requires_ceinsum
-def test_ij__i_single_operand_integral_coalesce():
+def test_ij__i_single_operand_integral_merge():
     """ij->i — a single operand integrates over its own j extent; the
-    overlapping i pieces are then coalesced."""
+    overlapping i pieces are then merged."""
     A = _ct(
         [(_T(0.0, 1.0), _T(2.0, 3.0)),   # i: [0,2), [1,3)
          (_T(0.0, 1.0), _T(3.0, 4.0))],  # j: [0,3), [1,4)
@@ -385,7 +385,7 @@ def test_ij__i_single_operand_integral_coalesce():
     out = ceinsum("ij->i", A)
 
     # piece0: 2·len([0,3))=6 on [0,2); piece1: 5·len([1,4))=15 on [1,3).
-    # coalesced: [0,1):6, [1,2):21, [2,3):15.
+    # merged: [0,1):6, [1,2):21, [2,3):15.
     expected = _ct(
         [(_T(0.0, 1.0, 2.0), _T(1.0, 2.0, 3.0))], _T(6.0, 21.0, 15.0), ["[)"]
     )

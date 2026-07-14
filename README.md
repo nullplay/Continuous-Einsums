@@ -15,9 +15,11 @@ the thesis chapter:
 2. **Product** — per mask entry, the candidate value (operand values × mask
    measure) and its output coordinates (max of starts / min of ends gathered
    through the mask positions).
-3. **Merge** — sum candidates with identical coordinates (unique +
-   scatter-add), then coalesce partially overlapping output intervals with a
-   sweep-line (1-D) or per-dimension cutting + discrete merge (N-D).
+3. **Merge** — one function resolves every collision: candidates are mapped
+   to integer rank space (pinpoint = one cell, interval = a run of cells),
+   identical coordinates are summed by packed-key grouping, and partial
+   interval overlaps are cut via a sweep-line (1-D) or per-dimension
+   cutting (N-D) before a final grouped sum.
 
 Mask creation is pluggable, with the chapter's three strategies implemented:
 dense broadcast comparison, binary search via `torch.searchsorted` (the
@@ -32,7 +34,7 @@ src/
   ceinsum_equation.py    einsum-string parsing
   ceinsum_mask.py        mask creation: conditions + integral measure (MV)
   ceinsum_product.py     per-tuple candidate values and output coordinates
-  ceinsum_merge.py       discrete merge + sweep-line / cut-then-merge coalesce
+  ceinsum_merge.py       unified rank-space merge (dedup, sweep, N-D cut)
   mask_dense.py          mask builder: brute-force N-D boolean table
   mask_binary_search.py  mask builder: searchsorted lead + post-filter
   mask_db_join.py        mask builder: polars database join (optional dep)
@@ -42,7 +44,7 @@ src/
 tests/
   test_ceinsum.py        hand-checked pipeline cases (incl. the manuscript's
                          worked examples)
-  test_merge.py          coalesce unit tests (sweep-line, N-D cutting)
+  test_merge.py          merge unit tests (sweep, N-D boxes, pinpoint groups)
   test_table_ceinsum.py  table reference + ceinsum agreement
   test_mapping.py        mask-builder correctness + benchmark cases (Polars)
   conftest.py            CLI options & fixtures

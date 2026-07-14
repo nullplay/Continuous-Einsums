@@ -13,11 +13,11 @@ mask → product → merge strategy of the thesis chapter, one module per step:
 2. :func:`ceinsum_product.compute_product`      — **product**: per mask entry,
    the candidate value (operand values × mask measure) and its output
    coordinates (max of starts / min of ends through the mask positions).
-3. :func:`ceinsum_merge.merge_discrete`         — **merge, discrete half**:
-   sum candidates with identical output coordinates (unique + scatter-add).
-   :func:`ceinsum_merge.coalesce` — **merge, continuous half**: when a
-   reduction leaves output pieces that *partially* overlap, a sweep-line cuts
-   them at their breakpoints into disjoint pieces and sums per region.
+3. :func:`ceinsum_merge.merge`                  — **merge**: sum candidates
+   that claim the same output region — identical coordinates and partially
+   overlapping intervals alike — into a canonical disjoint COO tensor. Runs
+   only when the einsum has a reduction; without one every candidate is
+   already a distinct, disjoint output piece.
 
 Example::
 
@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from ceinsum_equation import parse_equation
 from ceinsum_mask import MaskBuilder, build_mask
-from ceinsum_merge import coalesce, merge_discrete
+from ceinsum_merge import merge
 from ceinsum_product import compute_output_properties, compute_product
 from ctensor import ContinuousTensor, continuous_tensor
 
@@ -96,21 +96,19 @@ def ceinsum(
     # 2) Product: per-tuple candidate values and output coordinates.
     # eg: values = [2,3]·[10,10]·[100,200] = [2000,6000]
     #     i coords: start=max(t1.s,t2.s)=[1,1], end=min(t1.e,t2.e)=[2,3]
-    #     key_cols = (t1 col, t2 col) — the operands providing i
     product = compute_product(
         operands, mask, index_to_operand_dims, out_indices, index_properties
     )
 
-    # 3) Merge, discrete half: sum candidates sharing their output coordinates.
-    # eg: provider piece pairs (0,0),(1,0) are distinct → two output pieces,
-    #     ContinuousTensor(dims=(([1,1],[2,3]),), values=[2000,6000], ("[)",))
-    out = merge_discrete(product, out_property)
-
-    # Merge, continuous half: contracting an interleaved index can leave output
-    # pieces that *partially* overlap along an output dim (e.g. pinpoint j in
-    # "ij,i->i"). Rewrite them into a disjoint set, summing values where they
-    # overlapped. Only a reduction can produce such overlaps, and coalesce is
-    # itself a no-op when the pieces are already disjoint.
+    # 3) Merge: sum candidates claiming the same output region — identical
+    # coordinates (the contraction terms) and partially overlapping intervals
+    # alike — into disjoint pieces. Only a reduction can make candidates
+    # collide; without one they are already distinct, disjoint pieces and the
+    # merge is the identity, so the tensor is assembled directly.
+    # eg: contracted j puts both candidates on overlapping i intervals →
+    #     sweep cuts them at breakpoints {1,2,3}: [1,2)→8000, [2,3)→6000
     if has_reduction:
-        out = coalesce(out)
-    return out
+        return merge(product.coords, product.values, out_property)
+    return ContinuousTensor(
+        tuple(tuple(spec) for spec in product.coords), product.values, out_property
+    )

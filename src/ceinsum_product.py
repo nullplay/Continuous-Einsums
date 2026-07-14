@@ -13,8 +13,8 @@ output contribution:
 
 Everything is a gather through the mask's piece columns followed by
 elementwise maximum/minimum/multiply — an indirect einsum. Candidates are not
-deduplicated here; tuples landing on the same output piece are the terms of
-the contraction sum, merged by :func:`ceinsum_merge.merge_discrete`.
+deduplicated here; several may claim the same output region (the terms of the
+contraction sum), which :func:`ceinsum_merge.merge` resolves.
 
 This module also derives the output tensor's per-index property codes, which
 decide the coordinate layout (pinpoint vs interval) used above.
@@ -36,15 +36,10 @@ class Product(NamedTuple):
     * ``values`` — candidate value per join tuple.
     * ``coords`` — one coord spec per output index, in order: ``(coord,)``
       for a pinpoint index, ``(start, end)`` for an interval index.
-    * ``key_cols`` — the piece columns of the operands that *provide* an
-      output index. Tuples agreeing on all key columns share their output
-      coordinates and belong to the same output piece; empty for a scalar
-      output.
     """
 
     values: torch.Tensor
     coords: list[tuple[torch.Tensor, ...]]
-    key_cols: tuple[torch.Tensor, ...]
 
 
 def compute_output_properties(
@@ -107,10 +102,4 @@ def compute_product(
             )
             coords.append((starts.amax(0), ends.amin(0)))
 
-    # Grouping key: the piece columns of the output-providing operands.
-    provider_ops = sorted(
-        {op for oi in out_indices for (op, _d) in index_to_operand_dims[oi]}
-    )
-    key_cols = tuple(piece_idx[op] for op in provider_ops)
-
-    return Product(values, coords, key_cols)
+    return Product(values, coords)
