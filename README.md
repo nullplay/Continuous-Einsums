@@ -8,8 +8,8 @@ operations, comparing a brute-force boolean-table backend against an optimized
 
 ```
 src/      mapping builders + data synthesis
-  table_mapping.py       brute-force N-D boolean table backend
-  table_opt_mapping.py   optimized searchsorted backend
+  mask_dense.py          brute-force N-D boolean table backend
+  mask_binary_search.py  optimized searchsorted backend
   table_ceinsum.py       dense interaction-table einsum (thesis-chapter
                          reference; integrates all-interval contractions)
   synth_dataset.py       non-overlapping ND box generator for tests

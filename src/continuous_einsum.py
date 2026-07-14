@@ -47,7 +47,7 @@ def ceinsum(
 
     ``builder`` chooses the piece-join implementation passed to step 2: the
     optimized searchsorted builder (default, ``None``) or the naive all-pair
-    ``table_mapping.build_table_mapping``.
+    ``mask_dense.build_dense_mask``.
 
     Worked example (the same operands as ``tests/test_ceinsum.py::test_ij_i_j__i``)::
 

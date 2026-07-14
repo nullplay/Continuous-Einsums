@@ -17,7 +17,7 @@ A case is described by:
   tensors have the same length; the same tensor may be indexed by different
   axes (e.g. ``A[i] == A[j]`` for a self-join).
 
-``build_table_mapping(op, output, cond)`` returns a 0-arg callable that:
+``build_dense_mask(op, output, cond)`` returns a 0-arg callable that:
 
 1. Broadcasts each indexed tensor along its axis so the conditions can be
    evaluated as full N-dimensional boolean tensors,
@@ -101,7 +101,7 @@ def _eval(node, op, axis_pos):
     raise ValueError(f"unsupported AST node: {type(node).__name__}")
 
 
-def build_table_mapping(
+def build_dense_mask(
     op: Mapping[str, torch.Tensor],
     output: Sequence[str],
     cond: Sequence[str],
@@ -118,10 +118,10 @@ def build_table_mapping(
     axis_pos = {name: i for i, name in enumerate(output)}
     parsed = tuple(ast.parse(c, mode="eval") for c in cond)
 
-    def table_mapping() -> torch.Tensor:
+    def dense_mask() -> torch.Tensor:
         mask = _eval(parsed[0], op, axis_pos)
         for tree in parsed[1:]:
             mask = mask & _eval(tree, op, axis_pos)
         return torch.nonzero(mask, as_tuple=False).to(torch.long)
 
-    return table_mapping
+    return dense_mask

@@ -1,6 +1,6 @@
 """Declarative builder for the optimized table mapping pipeline.
 
-Uses the same DSL as :mod:`table_mapping` (a ``op`` dict of 1-D tensors, an
+Uses the same DSL as :mod:`mask_dense` (a ``op`` dict of 1-D tensors, an
 ordered ``output`` of axis names, and a list of ``tensor[axis]`` expression
 strings). Where the brute-force builder materializes the full N-D boolean
 table, this builder picks a "lead" condition, enumerates candidate pairs via
@@ -30,11 +30,11 @@ pairs against ``axis_c``'s values to form a ``(P, K)`` mask and calling
 ``torch.nonzero`` for the final column.
 
 Output: tuple of 1-D long index tensors matching the column order of
-``output`` passed to :func:`build_table_opt_mapping`.
+``output`` passed to :func:`build_binary_search_mask`.
 
 Limitations: cases whose only feasible lead involves three axes at once
 (for example the point-cloud case where the band radius depends on the third
-axis's values) are not auto-derived — :func:`build_table_opt_mapping` raises
+axis's values) are not auto-derived — :func:`build_binary_search_mask` raises
 a ``NotImplementedError`` and the case must keep its hand-written form.
 """
 
@@ -719,7 +719,7 @@ def _build_three_axis_band_closure(
 # ---------------------------------------------------------------------------
 
 
-def build_table_opt_mapping(
+def build_binary_search_mask(
     op: Mapping[str, torch.Tensor],
     output: Sequence[str],
     cond: Sequence[str],

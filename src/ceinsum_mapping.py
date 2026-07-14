@@ -1,7 +1,7 @@
 """Step 2 — mapping: join the operands' pieces under intersection conditions.
 
 Builds the ``op``/``output``/``cond`` arguments for
-:func:`table_opt_mapping.build_table_opt_mapping` from the operand properties
+:func:`mask_binary_search.build_binary_search_mask` from the operand properties
 and the index → operand-dim map, runs the join, and returns the surviving
 piece index per operand.
 
@@ -16,14 +16,14 @@ from typing import Callable, Sequence
 import torch
 
 from ctensor import ContinuousTensor, is_pinpoint, left_closed, right_closed
-from table_opt_mapping import build_table_opt_mapping
+from mask_binary_search import build_binary_search_mask
 
 # A "mapping builder" turns (op, output, cond) into a 0-arg closure that runs
 # the join. Two implementations share this signature:
 #
-# * ``table_opt_mapping.build_table_opt_mapping`` (default) — searchsorted lead
+# * ``mask_binary_search.build_binary_search_mask`` (default) — searchsorted lead
 #   + post-filter; its closure returns a TUPLE of 1-D columns (one per axis).
-# * ``table_mapping.build_table_mapping`` — naive all-pair boolean table +
+# * ``mask_dense.build_dense_mask`` — naive all-pair boolean table +
 #   ``nonzero``; its closure returns a single 2-D ``(num_matches, num_axes)``
 #   tensor. ``run_mapping`` normalizes that into the same tuple-of-columns.
 MappingBuilder = Callable[..., Callable[[], object]]
@@ -140,11 +140,11 @@ def run_mapping(
 
     ``builder`` selects the join implementation (see :data:`MappingBuilder`):
     the optimized searchsorted builder (default, when ``None``) or the naive
-    all-pair ``table_mapping.build_table_mapping``. Both produce identical
+    all-pair ``mask_dense.build_dense_mask``. Both produce identical
     joins; only their output layout differs, which this function normalizes.
     """
     if builder is None:
-        builder = build_table_opt_mapping
+        builder = build_binary_search_mask
     num = len(operands)
     if num > 3:
         raise NotImplementedError(

@@ -64,7 +64,7 @@ def pytest_addoption(parser):
         dest="mapping_bench_table",
         action="store_false",
         default=True,
-        help="skip the brute-force table_mapping/table_auto (OOM-prone at large N)",
+        help="skip the brute-force dense-mask backends (OOM-prone at large N)",
     )
     group.addoption(
         "--device-mode",

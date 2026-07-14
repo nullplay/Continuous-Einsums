@@ -57,8 +57,8 @@ from synth_dataset import (
     PINPOINT,
     create_nd_pieces,
 )
-from table_mapping import build_table_mapping
-from table_opt_mapping import build_table_opt_mapping
+from mask_dense import build_dense_mask
+from mask_binary_search import build_binary_search_mask
 
 
 DTYPE = DEFAULT_DTYPE
@@ -215,8 +215,8 @@ def _auto_builders(
     """Build the brute-force and searchsorted-optimized auto mappings from one
     DSL spec."""
     return (
-        build_table_mapping(op, output, eqs),
-        build_table_opt_mapping(op, output, eqs),
+        build_dense_mask(op, output, eqs),
+        build_binary_search_mask(op, output, eqs),
     )
 
 
