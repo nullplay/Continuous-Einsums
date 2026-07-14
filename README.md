@@ -10,6 +10,8 @@ operations, comparing a brute-force boolean-table backend against an optimized
 src/      mapping builders + data synthesis
   table_mapping.py       brute-force N-D boolean table backend
   table_opt_mapping.py   optimized searchsorted backend
+  table_ceinsum.py       dense interaction-table einsum (thesis-chapter
+                         reference; integrates all-interval contractions)
   synth_dataset.py       non-overlapping ND box generator for tests
 tests/    pytest suite
   test_mapping.py        correctness + benchmark cases
@@ -22,6 +24,8 @@ docs/     experiment write-ups (experiment_cpu.md, experiment_gpu.md)
 ```bash
 pytest                      # correctness tests
 pytest --mapping-bench      # include the timing benchmark
+python benchmarks/bench_table_ceinsum.py   # table-einsum benchmark
+                                           # -> docs/table_ceinsum_bench.md
 ```
 
 Useful options (see `tests/conftest.py`): `--mapping-n`, `--mapping-skew`,
