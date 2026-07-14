@@ -21,9 +21,8 @@ dimensions partition the candidates into independent groups (pieces only
 overlap at equal pinpoint coordinates).
 
 Exact-zero regions are dropped: explicit zeros do not survive coalescing.
-Boundary handling matches the COO model — one property per dimension, so the
-measure-zero contributions of fully-closed ``[]`` / fully-open ``()``
-boundaries are not separately represented, and pieces that merely touch are
+Intervals are half-open ``[s, e)``, so segments between breakpoints tile the
+line exactly — no boundary is double-counted and pieces that merely touch are
 never summed.
 """
 

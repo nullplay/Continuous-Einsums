@@ -22,7 +22,7 @@ mask → product → merge strategy of the thesis chapter, one module per step:
 Example::
 
     t1 = continuous_tensor([(xs, xe), (ys, ye)], v1, property=["[)", "[)"])
-    t2 = continuous_tensor([(a, b)],             v2, property=["[]"])
+    t2 = continuous_tensor([(a, b)],             v2, property=["[)"])
     t3 = continuous_tensor([(c,)],               v3, property=["P"])
     out = ceinsum("ij,i,j->i", t1, t2, t3)
 """
@@ -59,7 +59,7 @@ def ceinsum(
         t1 = ct([(_T(0,1), _T(2,3)),    # i: [0,2), [1,3)
                  (_T(0,5), _T(1,6))],   # j: [0,1), [5,6)
                 _T(2, 3), ["[)", "[)"])
-        t2 = ct([(_T(1,10), _T(4,12))], _T(10, 20), ["[]"])  # i: [1,4], [10,12]
+        t2 = ct([(_T(1,10), _T(4,12))], _T(10, 20), ["[)"])  # i: [1,4), [10,12)
         t3 = ct([(_T(0.5, 5.5),)],      _T(100, 200), ["P"]) # j: pts 0.5, 5.5
         out = ceinsum("ij,i,j->i", t1, t2, t3)
 
@@ -79,7 +79,7 @@ def ceinsum(
     has_reduction = bool(set("".join(in_indices)) - set(out_indices))
 
     # Output property per output index.
-    # eg: i is interval in t1 ("[)") and t2 ("[]") → conservative AND → {"i": "[)"}
+    # eg: i is interval in t1 and t2, j pinpoint via t3 → {"i": "[)"}
     index_properties = compute_output_properties(
         operands, index_to_operand_dims, out_indices
     )

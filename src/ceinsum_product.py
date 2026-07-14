@@ -27,7 +27,7 @@ from typing import NamedTuple, Sequence
 import torch
 
 from ceinsum_mask import Mask
-from ctensor import PINPOINT, ContinuousTensor, is_pinpoint, left_closed, right_closed
+from ctensor import INTERVAL, PINPOINT, ContinuousTensor, is_pinpoint
 
 
 class Product(NamedTuple):
@@ -54,29 +54,16 @@ def compute_output_properties(
 ) -> dict[str, str]:
     """Derive each *output* index's property from the operand dims that carry it.
 
-    Intersecting pieces along a shared index combines their boundary kinds
-    *conservatively*, boundary-by-boundary:
-
-    * if **any** contributing dim is a pinpoint, the output index is a pinpoint
-      (the point pins the coordinate regardless of the other intervals);
-    * otherwise the output is an interval that is left-closed iff **every**
-      contributing dim is left-closed, and right-closed iff **every**
-      contributing dim is right-closed. (A single open boundary anywhere opens
-      that side of the intersection.)
+    If **any** contributing dim is a pinpoint, the output index is a pinpoint
+    (the point pins the coordinate regardless of the other intervals);
+    otherwise it is a half-open interval — the intersection of half-open
+    intervals is half-open.
     """
     total: dict[str, str] = {}
     for index in out_indices:
         op_dims = index_to_operand_dims[index]
         properties = [operands[op].property[dim] for (op, dim) in op_dims]
-
-        if PINPOINT in properties:
-            total[index] = PINPOINT
-            continue
-
-        lc = all(left_closed(p) for p in properties)
-        rc = all(right_closed(p) for p in properties)
-        total[index] = ("[" if lc else "(") + ("]" if rc else ")")
-
+        total[index] = PINPOINT if PINPOINT in properties else INTERVAL
     return total
 
 

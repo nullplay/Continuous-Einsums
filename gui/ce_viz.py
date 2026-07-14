@@ -31,13 +31,11 @@ from ctensor import (  # noqa: E402
     ContinuousTensor,
     continuous_tensor,
     is_pinpoint,
-    left_closed,
-    right_closed,
 )
 from ceinsum_equation import parse_equation  # noqa: E402
 
 DT = torch.float64
-PROP_OPTIONS = ["[)", "(]", "[]", "()", "P"]
+PROP_OPTIONS = ["[)", "P"]
 PALETTE = ["#27ae60", "#2980b9", "#000000"]   # operand colors: green, blue, black
 OUTPUT_COLOR = "#c0392b"                       # output pieces: always red
 
@@ -101,22 +99,13 @@ def to_numpy_equation(out_indices: str, in_indices: list[str]) -> str:
     return ",".join(in_indices) + "->" + out_indices
 
 
-def _interval_overlap(
-    lo_a: float, hi_a: float, lo_b: float, hi_b: float,
-    lc: bool, rc: bool,
-) -> bool:
-    """Do two same-property intervals share at least one point?
+def _interval_overlap(lo_a: float, hi_a: float, lo_b: float, hi_b: float) -> bool:
+    """Do two half-open intervals share at least one point?
 
-    ``lc``/``rc`` are the (shared) closed-ness of the left/right boundary. Two
-    intervals that merely touch at a single coordinate overlap only when both
-    adjoining boundaries are closed (e.g. ``[a,b]`` and ``[b,c]`` share ``b``,
-    but ``[a,b)`` and ``[b,c)`` do not).
+    Intervals are ``[lo, hi)``, so merely touching at a single coordinate
+    (``[a,b)`` and ``[b,c)``) does not overlap.
     """
-    if lo_a > hi_b or lo_b > hi_a:
-        return False
-    if lo_a == hi_b or lo_b == hi_a:        # touching at a single point
-        return lc and rc
-    return True
+    return lo_a < hi_b and lo_b < hi_a
 
 
 def piece_overlaps(a: dict, b: dict, props: list[str]) -> bool:
@@ -133,8 +122,7 @@ def piece_overlaps(a: dict, b: dict, props: list[str]) -> bool:
         else:
             lo_a, hi_a = sorted((_f(a, f"lo{d}"), _f(a, f"hi{d}")))
             lo_b, hi_b = sorted((_f(b, f"lo{d}"), _f(b, f"hi{d}")))
-            if not _interval_overlap(lo_a, hi_a, lo_b, hi_b,
-                                     left_closed(prop), right_closed(prop)):
+            if not _interval_overlap(lo_a, hi_a, lo_b, hi_b):
                 return False
     return True
 
@@ -230,8 +218,8 @@ def _dim_span(ct: ContinuousTensor, p: int, d: int) -> tuple[float, float, bool]
 
 
 def _endpoint_symbols(prop: str) -> tuple[str, str]:
-    return ("circle" if left_closed(prop) else "circle-open",
-            "circle" if right_closed(prop) else "circle-open")
+    # Half-open [lo, hi): closed start, open end.
+    return ("circle", "circle-open")
 
 
 def tensor_figure(

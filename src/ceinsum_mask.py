@@ -34,7 +34,7 @@ from typing import Callable, NamedTuple, Sequence
 
 import torch
 
-from ctensor import ContinuousTensor, is_pinpoint, left_closed, right_closed
+from ctensor import ContinuousTensor, is_pinpoint
 from mask_binary_search import build_binary_search_mask
 
 
@@ -98,13 +98,12 @@ def build_conditions(
     For each shared index, every pair of operand dims carrying it must
     intersect:
 
-    * interval / interval  -> overlap (``sA <op> eB`` and ``sB <op> eA``)
-    * pinpoint / interval  -> point-in-interval (``s <op> p`` and ``p <op> e``)
+    * interval / interval  -> overlap (``sA < eB`` and ``sB < eA``)
+    * pinpoint / interval  -> point-in-interval (``s <= p`` and ``p < e``)
     * pinpoint / pinpoint  -> equality
 
-    Bracket codes decide whether a touching boundary (``==``) counts: a
-    comparison is non-strict (``<=``) only when *both* adjoining boundaries are
-    closed, otherwise strict (``<``).
+    Intervals are half-open ``[s, e)``, so overlap is strict (touching
+    boundaries never intersect) and containment is closed at the start only.
     """
     cond: list[str] = []
     for occ in index_to_operand_dims.values():
@@ -126,34 +125,28 @@ def build_conditions(
                         f"{_coord(opA, dimA)}[{axA}] == {_coord(opB, dimB)}[{axB}]"
                     )
                 elif a_pin:
-                    # point A inside interval B = [sB, eB]:  sB <op> cA <op> eB
-                    lo = "<=" if left_closed(pB) else "<"
-                    hi = "<=" if right_closed(pB) else "<"
+                    # point A inside interval B = [sB, eB):  sB <= cA < eB
                     cond.append(
-                        f"{_start(opB, dimB)}[{axB}] {lo} {_coord(opA, dimA)}[{axA}]"
+                        f"{_start(opB, dimB)}[{axB}] <= {_coord(opA, dimA)}[{axA}]"
                     )
                     cond.append(
-                        f"{_coord(opA, dimA)}[{axA}] {hi} {_end(opB, dimB)}[{axB}]"
+                        f"{_coord(opA, dimA)}[{axA}] < {_end(opB, dimB)}[{axB}]"
                     )
                 elif b_pin:
-                    # point B inside interval A = [sA, eA]:  sA <op> cB <op> eA
-                    lo = "<=" if left_closed(pA) else "<"
-                    hi = "<=" if right_closed(pA) else "<"
+                    # point B inside interval A = [sA, eA):  sA <= cB < eA
                     cond.append(
-                        f"{_start(opA, dimA)}[{axA}] {lo} {_coord(opB, dimB)}[{axB}]"
+                        f"{_start(opA, dimA)}[{axA}] <= {_coord(opB, dimB)}[{axB}]"
                     )
                     cond.append(
-                        f"{_coord(opB, dimB)}[{axB}] {hi} {_end(opA, dimA)}[{axA}]"
+                        f"{_coord(opB, dimB)}[{axB}] < {_end(opA, dimA)}[{axA}]"
                     )
                 else:
-                    # interval A overlaps interval B:  sA <op1> eB  AND  sB <op2> eA
-                    op1 = "<=" if (left_closed(pA) and right_closed(pB)) else "<"
-                    op2 = "<=" if (left_closed(pB) and right_closed(pA)) else "<"
+                    # interval A overlaps interval B:  sA < eB  AND  sB < eA
                     cond.append(
-                        f"{_start(opA, dimA)}[{axA}] {op1} {_end(opB, dimB)}[{axB}]"
+                        f"{_start(opA, dimA)}[{axA}] < {_end(opB, dimB)}[{axB}]"
                     )
                     cond.append(
-                        f"{_start(opB, dimB)}[{axB}] {op2} {_end(opA, dimA)}[{axA}]"
+                        f"{_start(opB, dimB)}[{axB}] < {_end(opA, dimA)}[{axA}]"
                     )
     return cond
 
@@ -199,9 +192,9 @@ def compute_mask_values(
             e = operands[op].dims[d][1][piece_idx[op]]
             lo = s if lo is None else torch.maximum(lo, s)
             hi = e if hi is None else torch.minimum(hi, e)
-        # The mask conditions already guarantee a positive overlap for strict
-        # (open) predicates; closed brackets can produce an exactly-zero
-        # touching overlap, which correctly contributes nothing.
+        # The mask's strict overlap conditions already guarantee a positive
+        # overlap on every carrier of a *joined* index; the clamp only guards
+        # the single-carrier case where no join constrained the interval.
         w = (hi - lo).clamp(min=0)
         mv = w if mv is None else mv * w
     return mv

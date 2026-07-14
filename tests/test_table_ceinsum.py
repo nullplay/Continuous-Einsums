@@ -273,9 +273,9 @@ def test_output_types_follow_carriers():
 
 
 def test_rejects_unsupported_brackets():
-    A = _ct([(_T(0.0), _T(1.0))], _T(1.0), ["[]"])
-    with pytest.raises(NotImplementedError):
-        table_ceinsum("i->i", A)
+    """Non-half-open codes fail already at tensor construction."""
+    with pytest.raises(ValueError, match="invalid property"):
+        _ct([(_T(0.0), _T(1.0))], _T(1.0), ["[]"])
 
 
 def test_repeated_output_index_reuses_column():

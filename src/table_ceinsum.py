@@ -23,8 +23,7 @@ Interaction Tables" section):
 Differences from :func:`continuous_einsum.ceinsum`: the two share integral
 semantics (a contracted variable whose carriers are all intervals is
 measure-weighted), but this implementation keeps explicit zero output pieces
-(shapes depend only on the input coordinates) and supports only half-open
-``"[)"`` intervals and ``"P"`` pinpoints. It materializes the full dense
+(shapes depend only on the input coordinates). It materializes the full dense
 table, so it is a specification-level reference, not an optimized path.
 """
 
@@ -36,10 +35,7 @@ from dataclasses import dataclass
 import torch
 
 from ceinsum_equation import parse_equation
-from ctensor import ContinuousTensor, continuous_tensor
-
-PINPOINT = "P"
-INTERVAL = "[)"
+from ctensor import INTERVAL, PINPOINT, ContinuousTensor, continuous_tensor
 
 # A "carrier spec" is the coordinate arrays of one dimension of one tensor,
 # tagged with the table axis it varies along: (spec, axis) where spec is
@@ -126,14 +122,6 @@ def _candidates(
 
 def table_ceinsum(equation: str, *operands: ContinuousTensor) -> GridResult:
     """Evaluate a continuous einsum via the dense interaction table."""
-    for op in operands:
-        for prop in op.property:
-            if prop not in (PINPOINT, INTERVAL):
-                raise NotImplementedError(
-                    f"table_ceinsum supports only {INTERVAL!r} and {PINPOINT!r} "
-                    f"dimensions, got {prop!r}"
-                )
-
     in_indices, out_indices, carriers_of = parse_equation(equation, len(operands))
     out_vars = "".join(dict.fromkeys(out_indices))  # distinct, in output order
     for v in out_vars:

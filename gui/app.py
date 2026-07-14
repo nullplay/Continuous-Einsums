@@ -287,27 +287,6 @@ for _i in range(MAX_OPERANDS):
     _register_operand_callbacks(_i)
 
 
-def _check_property_consistency(in_indices, operand_props):
-    """Raise if an index is carried by interval dims with mismatched properties.
-
-    Pieces sharing an index are intersected along it, so their boundary kinds
-    must agree (e.g. intersecting a ``[)`` dim with a ``[]`` dim is ambiguous).
-    Pinpoints may coexist with any interval (point-in-interval is well defined).
-    """
-    index_props: dict[str, set[str]] = {}
-    for i, idx in enumerate(in_indices):
-        for d, letter in enumerate(idx):
-            if d < len(operand_props[i]):
-                index_props.setdefault(letter, set()).add(operand_props[i][d])
-    for letter, props in index_props.items():
-        intervals = {p for p in props if p != "P"}
-        if len(intervals) > 1:
-            raise ValueError(
-                f"property mismatch on index '{letter}': "
-                f"{sorted(intervals)} cannot be intersected"
-            )
-
-
 # --- Reactive: recompute the einsum and render the output on every change ----
 @app.callback(
     Output("out-graph", "figure"),
@@ -342,7 +321,6 @@ def run(*args):
             props = [prop0s[i], prop1s[i]][:ndim]
             operand_rows.append(tables[i] or [])
             operand_props.append(props)
-        _check_property_consistency(eq["in_indices"], operand_props)
         out, _in, out_idx = run_einsum(
             eq["eq_str"], operand_rows, operand_props)
         out_name = eq.get("out_name") or "y"

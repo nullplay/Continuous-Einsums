@@ -8,9 +8,11 @@ one coordinate spec per dimension plus a single value. A dimension is either:
 
 ``property[d]`` is a code per dimension:
 
-* ``"[)"`` ``"(]"`` ``"[]"`` ``"()"`` — interval, the brackets giving the
-  closed/open-ness of the (start, end) boundaries;
+* ``"[)"`` — a half-open interval ``[start, end)``;
 * ``"P"`` — pinpoint.
+
+Half-open is the only interval kind: intervals tile the line without gaps or
+double-counted boundaries, which keeps intersection and coalescing exact.
 """
 
 from __future__ import annotations
@@ -21,22 +23,12 @@ from typing import Sequence
 import torch
 
 PINPOINT = "P"
-INTERVAL_PROPERTIES = ("[)", "(]", "[]", "()")
-VALID_PROPERTIES = INTERVAL_PROPERTIES + (PINPOINT,)
+INTERVAL = "[)"
+VALID_PROPERTIES = (INTERVAL, PINPOINT)
 
 
 def is_pinpoint(prop: str) -> bool:
     return prop == PINPOINT
-
-
-def left_closed(prop: str) -> bool:
-    """Interval start boundary is closed (``[``)."""
-    return prop[0] == "["
-
-
-def right_closed(prop: str) -> bool:
-    """Interval end boundary is closed (``]``)."""
-    return prop[1] == "]"
 
 
 @dataclass(frozen=True)

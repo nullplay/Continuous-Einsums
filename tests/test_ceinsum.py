@@ -5,18 +5,18 @@ expected output tensor. No reference implementation, no synthesis — just
 "feed these pieces, expect this result", across a variety of einsum equations,
 operand dimensionalities, and property combinations (operand count kept ≤ 3).
 
-Semantics being pinned down (see continuous_einsum module docstring):
+Semantics being pinned down (see continuous_einsum module docstring). All
+intervals are half-open ``[)``; pinpoints are ``P``.
 
-* Interval/interval overlap: ``lo1 OP hi2`` and ``lo2 OP hi1`` where ``OP`` is
-  ``<=`` only when *both* touching boundaries are closed, else ``<``.
-* Point in interval: ``lo OP p`` and ``p OP hi`` with the same closed→``<=``
-  rule. Pinpoint vs pinpoint: exact equality.
+* Interval/interval overlap: ``lo1 < hi2`` and ``lo2 < hi1`` (strict —
+  touching intervals do not intersect).
+* Point in interval ``[lo, hi)``: ``lo <= p < hi``. Pinpoint vs pinpoint:
+  exact equality.
 * Output piece identity = the tuple of piece indices of the operands providing
   the output indices (uniqueness by contributing pieces, not coordinate value).
 * Output coordinate: ``start = max(starts)``, ``end = min(ends)``; if any
   provider is a pinpoint the output index is a pinpoint and the coord is copied.
-* Output dim property: pinpoint if any provider is a pinpoint; else interval,
-  left-closed iff all providers left-closed, right-closed iff all right-closed.
+* Output dim property: pinpoint if any provider is a pinpoint, else ``[)``.
 * Output value: product of matched operands' values times the mask's integral
   measure, scatter-added per output piece. A reduced index whose carriers are
   all intervals integrates: each join tuple is weighted by the intersection
@@ -128,16 +128,24 @@ def test_i_i__i_pinpoint_equality():
 
 
 @requires_ceinsum
-def test_i_i__i_touching_closed_overlaps():
-    """[] ⨉ [] intervals touching at a single closed point overlap."""
-    a = _ct([(_T(0.0, 3.0), _T(1.0, 5.0))], _T(2.0, 4.0), ["[]"])  # [0,1], [3,5]
-    b = _ct([(_T(1.0, 6.0), _T(2.0, 9.0))], _T(3.0, 7.0), ["[]"])  # [1,2], [6,9]
+def test_i_i__i_touching_halfopen_disjoint():
+    """[) ⨉ [) intervals that merely touch at a boundary do not intersect."""
+    a = _ct([(_T(0.0, 3.0), _T(1.0, 5.0))], _T(2.0, 4.0), ["[)"])  # [0,1), [3,5)
+    b = _ct([(_T(1.0, 6.0), _T(2.0, 9.0))], _T(3.0, 7.0), ["[)"])  # [1,2), [6,9)
 
     out = ceinsum("i,i->i", a, b)
 
-    # [0,1]∩[1,2]=[1,1] (touch, both closed) v=2*3=6 ; [3,5]∩[6,9]=∅
-    expected = _ct([(_T(1.0), _T(1.0))], _T(6.0), ["[]"])
-    assert_ceinsum(out, expected, "i,i->i touching []")
+    # [0,1)∩[1,2)=∅ (touching) ; [3,5)∩[6,9)=∅ → empty output
+    expected = _ct([(_T(), _T())], _T(), ["[)"])
+    assert_ceinsum(out, expected, "i,i->i touching [)")
+
+
+@requires_ceinsum
+def test_rejects_non_halfopen_property():
+    """Only "[)" and "P" property codes exist; others fail at construction."""
+    for bad in ("(]", "[]", "()"):
+        with pytest.raises(ValueError, match="invalid property"):
+            _ct([(_T(0.0), _T(1.0))], _T(1.0), [bad])
 
 
 # ===========================================================================
@@ -154,13 +162,13 @@ def test_ij_i_j__i():
         _T(2.0, 3.0),
         ["[)", "[)"],
     )
-    t2 = _ct([(_T(1.0, 10.0), _T(4.0, 12.0))], _T(10.0, 20.0), ["[]"])  # i: [1,4],[10,12]
+    t2 = _ct([(_T(1.0, 10.0), _T(4.0, 12.0))], _T(10.0, 20.0), ["[)"])  # i: [1,4),[10,12)
     t3 = _ct([(_T(0.5, 5.5),)], _T(100.0, 200.0), ["P"])               # j: pts 0.5, 5.5
 
     out = ceinsum("ij,i,j->i", t1, t2, t3)
 
-    # (t1.0,t2.0): [0,2)∩[1,4]=[1,2), v=2*10*100=2000
-    # (t1.1,t2.0): [1,3)∩[1,4]=[1,3), v=3*10*200=6000
+    # (t1.0,t2.0): [0,2)∩[1,4)=[1,2), v=2*10*100=2000
+    # (t1.1,t2.0): [1,3)∩[1,4)=[1,3), v=3*10*200=6000
     # j is contracted, so these two overlapping i-pieces are summed where they
     # overlap (coalesce step): [1,2)→2000+6000=8000, [2,3)→6000.
     expected = _ct([(_T(1.0, 2.0), _T(2.0, 3.0))], _T(8000.0, 6000.0), ["[)"])
@@ -240,30 +248,30 @@ def test_ij_jk__ik_matmul():
 
 
 @requires_ceinsum
-def test_ij_ij__ij_pointwise_2d_leftopen():
-    """ij,ij->ij — 2-D pointwise overlap with a left-open (] dimension."""
+def test_ij_ij__ij_pointwise_2d():
+    """ij,ij->ij — 2-D pointwise overlap of interval boxes."""
     op0 = _ct(
         [(_T(0.0, 4.0), _T(2.0, 6.0)),       # i: [0,2), [4,6)
-         (_T(10.0, 14.0), _T(12.0, 16.0))],  # j: (10,12], (14,16]
+         (_T(10.0, 14.0), _T(12.0, 16.0))],  # j: [10,12), [14,16)
         _T(2.0, 3.0),
-        ["[)", "(]"],
+        ["[)", "[)"],
     )
     op1 = _ct(
         [(_T(1.0, 5.0), _T(3.0, 7.0)),       # i: [1,3), [5,7)
-         (_T(11.0, 15.0), _T(13.0, 17.0))],  # j: (11,13], (15,17]
+         (_T(11.0, 15.0), _T(13.0, 17.0))],  # j: [11,13), [15,17)
         _T(5.0, 7.0),
-        ["[)", "(]"],
+        ["[)", "[)"],
     )
 
     out = ceinsum("ij,ij->ij", op0, op1)
 
-    # (p0,q0): i [0,2)∩[1,3)=[1,2) ; j (10,12]∩(11,13]=(11,12] ; v=2*5=10
-    # (p1,q1): i [4,6)∩[5,7)=[5,6) ; j (14,16]∩(15,17]=(15,16] ; v=3*7=21
+    # (p0,q0): i [0,2)∩[1,3)=[1,2) ; j [10,12)∩[11,13)=[11,12) ; v=2*5=10
+    # (p1,q1): i [4,6)∩[5,7)=[5,6) ; j [14,16)∩[15,17)=[15,16) ; v=3*7=21
     expected = _ct(
         [(_T(1.0, 5.0), _T(2.0, 6.0)),
          (_T(11.0, 15.0), _T(12.0, 16.0))],
         _T(10.0, 21.0),
-        ["[)", "(]"],
+        ["[)", "[)"],
     )
     assert_ceinsum(out, expected, "ij,ij->ij")
 
@@ -294,18 +302,17 @@ def test_ijk_k__ij_3d_operand():
 
 
 @requires_ceinsum
-def test_i_i_i__i_three_providers_property():
-    """i,i,i->i — 3 interval operands; output property is the conservative AND."""
-    a = _ct([(_T(0.0), _T(10.0))], _T(2.0), ["[]"])  # [0,10]
-    b = _ct([(_T(1.0), _T(8.0))], _T(3.0), ["[]"])   # [1,8]
+def test_i_i_i__i_three_providers():
+    """i,i,i->i — 3 interval operands intersect to one piece."""
+    a = _ct([(_T(0.0), _T(10.0))], _T(2.0), ["[)"])  # [0,10)
+    b = _ct([(_T(1.0), _T(8.0))], _T(3.0), ["[)"])   # [1,8)
     c = _ct([(_T(2.0), _T(9.0))], _T(5.0), ["[)"])   # [2,9)
 
     out = ceinsum("i,i,i->i", a, b, c)
 
     # intersect: start=max(0,1,2)=2, end=min(10,8,9)=8.
-    # left closed: all left-closed → "[" ; right closed: c is open → ")".
     expected = _ct([(_T(2.0), _T(8.0))], _T(30.0), ["[)"])
-    assert_ceinsum(out, expected, "i,i,i->i property")
+    assert_ceinsum(out, expected, "i,i,i->i three providers")
 
 
 # ===========================================================================
