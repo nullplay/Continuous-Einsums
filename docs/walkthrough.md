@@ -278,3 +278,11 @@ construction reproduces ordinary sparse einsum exactly: continuous einsum is
 a strict generalization. The uncompressed table is exponential in the number
 of operands, so it is best read not as an algorithm but as the
 *specification* that any practical evaluation strategy must agree with.
+
+The optimized pipeline (`continuous_einsum.ceinsum`) is that practical
+strategy: it realizes the same specification as a sparse **mask → product →
+merge** computation — the interaction table stored sparsely as a join
+(`ceinsum_mask`), per-tuple values and coordinates (`ceinsum_product`), and a
+discrete merge plus sweep-line coalesce (`ceinsum_merge`) — and it shares the
+integral semantics above: a contracted all-interval index weights each
+contribution by its overlap length.

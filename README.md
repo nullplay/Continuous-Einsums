@@ -1,22 +1,54 @@
 # Continuous Einsums
 
-Experiments on mapping pipelines for continuous (interval/pinpoint) einsum-style
-operations, comparing a brute-force boolean-table backend against an optimized
-`searchsorted`-based backend and a Polars backend.
+Einsums over piecewise-constant *continuous* tensors: COO pieces indexed by
+real-valued pinpoints and intervals, where shared indices combine when their
+coordinates **intersect** rather than being equal, and contracting an
+all-interval index computes an integral (each contribution weighted by its
+overlap length).
+
+The evaluation follows the format-aware **mask → product → merge** strategy of
+the thesis chapter:
+
+1. **Mask** — a sparse join over the operands' piece positions; entry
+   `(a, b, ...)` exists iff the pieces intersect on every shared index, and
+   carries the intersection lengths of the reduced interval indices.
+2. **Product** — per mask entry, the candidate value (operand values × mask
+   measure) and its output coordinates (max of starts / min of ends gathered
+   through the mask positions).
+3. **Merge** — sum candidates with identical coordinates (unique +
+   scatter-add), then coalesce partially overlapping output intervals with a
+   sweep-line (1-D) or per-dimension cutting + discrete merge (N-D).
+
+Mask creation is pluggable; two strategies are implemented (dense broadcast
+comparison and binary search via `torch.searchsorted`), and the mapping test
+suite additionally benchmarks a Polars database-join formulation.
 
 ## Layout
 
 ```
-src/      mapping builders + data synthesis
-  mask_dense.py          brute-force N-D boolean table backend
-  mask_binary_search.py  optimized searchsorted backend
+src/
+  ctensor.py             ContinuousTensor: COO pieces + per-dim property codes
+  continuous_einsum.py   public API: ceinsum(equation, *operands)
+  ceinsum_equation.py    einsum-string parsing
+  ceinsum_mask.py        mask creation: conditions + integral measure (MV)
+  ceinsum_product.py     per-tuple candidate values and output coordinates
+  ceinsum_merge.py       discrete merge + sweep-line / cut-then-merge coalesce
+  mask_dense.py          mask builder: brute-force N-D boolean table
+  mask_binary_search.py  mask builder: searchsorted lead + post-filter
   table_ceinsum.py       dense interaction-table einsum (thesis-chapter
-                         reference; integrates all-interval contractions)
+                         specification reference; same integral semantics)
   synth_dataset.py       non-overlapping ND box generator for tests
-tests/    pytest suite
-  test_mapping.py        correctness + benchmark cases
+tests/
+  test_ceinsum.py        hand-checked pipeline cases (incl. the manuscript's
+                         worked examples)
+  test_merge.py          coalesce unit tests (sweep-line, N-D cutting)
+  test_table_ceinsum.py  table reference + ceinsum agreement
+  test_mapping.py        mask-builder correctness + benchmark cases (Polars)
   conftest.py            CLI options & fixtures
-docs/     experiment write-ups (experiment_cpu.md, experiment_gpu.md)
+benchmarks/
+  bench_table_ceinsum.py table vs pipeline timing -> docs/table_ceinsum_bench.md
+gui/      interactive Dash visualizer (deployed via wsgi.py / Procfile)
+docs/     write-ups: walkthrough.md (theory), experiment_*.md, bench results
 ```
 
 ## Running
@@ -26,7 +58,9 @@ pytest                      # correctness tests
 pytest --mapping-bench      # include the timing benchmark
 python benchmarks/bench_table_ceinsum.py   # table-einsum benchmark
                                            # -> docs/table_ceinsum_bench.md
+python gui/app.py           # interactive visualizer at 127.0.0.1:8050
 ```
 
 Useful options (see `tests/conftest.py`): `--mapping-n`, `--mapping-skew`,
-`--device-mode {gpu,cpu-single,cpu-multi}`.
+`--device-mode {gpu,cpu-single,cpu-multi}`. Tests need `pytest`;
+`test_mapping.py` additionally needs `polars` (skipped when absent).

@@ -3,13 +3,13 @@
 Three cases, matching the thesis chapter:
 
 1. ``i,i->i``   both interval           — vs the existing ``ceinsum`` pipeline
-2. ``ij,j->i``  interval i, pinpoint j  — vs ``ceinsum`` (mapping + coalesce path)
-3. ``ik,kj->ij`` A:(P,I), B:(I,I)       — table-only (integration semantics,
-                                          no baseline with matching semantics)
+2. ``ij,j->i``  interval i, pinpoint j  — vs ``ceinsum`` (mask + coalesce path)
+3. ``ik,kj->ij`` A:(P,I), B:(I,I)       — vs ``ceinsum`` (integrated k: both
+                                          weight by the k-overlap length)
 
-For cases 1-2 the two implementations are also cross-checked pointwise (their
-piece lists differ by construction — grid cells vs per-match intersections —
-so values at probe points are compared, not pieces).
+The two implementations are also cross-checked pointwise (their piece lists
+differ by construction — grid cells vs per-match intersections — so values at
+probe points are compared, not pieces).
 
 Sizes whose predicted table exceeds the element guard are skipped and reported
 as such: the dense-table memory wall is a *result* of this reference
@@ -139,7 +139,15 @@ def case_integrated_matmul(n: int):
         _values(n, 45),
         ["[)", "[)"],
     )
-    return "ik,kj->ij", (A, B), None  # integration semantics: no baseline
+
+    def probes():
+        # 2-D probes: every i level × a capped set of j-cell midpoints.
+        i_levels = torch.unique(A.dims[0][0])
+        j_mid = _probe_midpoints(B.dims[1])[:, 0]
+        step = max(1, (len(j_mid) * len(i_levels)) // N_PROBES)
+        return torch.cartesian_prod(i_levels, j_mid[::step])
+
+    return "ik,kj->ij", (A, B), probes
 
 
 def _predict_table(equation: str, operands) -> tuple[list[int], int]:
@@ -162,7 +170,7 @@ def _predict_table(equation: str, operands) -> tuple[list[int], int]:
 CASES = [
     ("`i,i->i` (interval × interval)", case_elementwise, True),
     ("`ij,j->i` (interval-i, pinpoint-j)", case_pinpoint_contraction, True),
-    ("`ik,kj->ij` (A: P,I × B: I,I — integrated k)", case_integrated_matmul, False),
+    ("`ik,kj->ij` (A: P,I × B: I,I — integrated k)", case_integrated_matmul, True),
 ]
 
 
@@ -180,8 +188,7 @@ def run(sizes: list[int], repeats: int) -> str:
     lines.append(
         "`table` times include the flatten to a COO piece list, so both columns "
         "produce the same kind of object. `max rel Δ` is the pointwise value "
-        "disagreement between the two implementations at probe points (cases "
-        "with matching semantics only)."
+        "disagreement between the two implementations at probe points."
     )
 
     for title, make_case, has_baseline in CASES:
@@ -245,15 +252,9 @@ def run(sizes: list[int], repeats: int) -> str:
         "product-scaling cost only dominates once the piece counts grow."
     )
     lines.append(
-        "- Where the two implementations share semantics (no all-interval "
-        "contraction), their outputs agree pointwise to float32 precision "
-        "(`max rel Δ` column)."
-    )
-    lines.append(
-        "- The integrated case (`ik,kj->ij`) has no baseline column because "
-        "the existing pipeline computes unweighted products, while the table "
-        "implementation integrates over the contracted interval variable "
-        "(measure weighting) — the semantics differ by design."
+        "- The two implementations share integral semantics (a contracted "
+        "all-interval variable is weighted by its overlap length) and agree "
+        "pointwise to float32 precision on every case (`max rel Δ` column)."
     )
     return "\n".join(lines) + "\n"
 
