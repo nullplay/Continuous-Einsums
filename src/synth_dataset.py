@@ -199,31 +199,3 @@ def create_nd_pieces(
         cells, dim_kinds, dim_maxes, cpd,
         seed=seed, device=device, dtype=dtype,
     )
-
-
-def create_2d_boxes(
-    n: int,
-    max_x: float,
-    max_y: float,
-    skew: float = 0.0,
-    *,
-    seed: int | None = None,
-    device: torch.device = DEFAULT_DEVICE,
-    dtype: torch.dtype = DEFAULT_DTYPE,
-) -> torch.Tensor:
-    """``n`` non-overlapping 2D rectangles → ``(n, 4)`` tensor of ``[x_s, x_e, y_s, y_e]``.
-
-    Thin wrapper over :func:`create_nd_pieces` with both axes set to
-    ``'interval'``; matches the ``2dbox(N, max)`` sketch in the design note.
-    """
-    pieces = create_nd_pieces(
-        n,
-        (INTERVAL, INTERVAL),
-        (max_x, max_y),
-        skew,
-        seed=seed,
-        device=device,
-        dtype=dtype,
-    )
-    (xs, xe), (ys, ye) = pieces
-    return torch.stack((xs, xe, ys, ye), dim=1)

@@ -1,5 +1,11 @@
 # CPU Mapping Benchmark — N sweep at skew=0.5
 
+*Historical results: produced with the pre-refactor mask builders
+(`table_mapping`/`table_opt_mapping`, since renamed to `mask_dense`/
+`mask_binary_search`) and hand-written polars plans, before the
+searchsorted band fix and the generic `mask_db_join` builder existed.
+Kept for reference; superseded by the benchmark suite.*
+
 Median of 3 repeats (2 for the slowest standalone case 19 runs), all values in ms.
 `skew=0.5`, all 19 mapping cases. Backends:
 `table` (brute-force N-D bool mask + nonzero), `table_opt` (hand-written
