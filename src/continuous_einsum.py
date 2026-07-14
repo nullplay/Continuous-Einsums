@@ -63,9 +63,15 @@ def ceinsum(
     # 0) Parse the equation into the index → operand-dim map.
     # eg: in=["ij","i","j"], out="i",
     #     index_to_operand_dims={"i":[(0,0),(1,0)], "j":[(0,1),(2,0)]}
-    _in_indices, out_indices, index_to_operand_dims = parse_equation(
+    in_indices, out_indices, index_to_operand_dims = parse_equation(
         equation, len(operands)
     )
+
+    # A reduction (a contracted index — present in the inputs but not the
+    # output) is what can leave the output with pieces that overlap along an
+    # output dim; only then is coalescing needed. Without one the output pieces
+    # are already disjoint, so we skip the step entirely.
+    has_reduction = bool(set("".join(in_indices)) - set(out_indices))
 
     # 1) Output property per output index.
     # eg: i is interval in t1 ("[)") and t2 ("[]") → conservative AND → {"i": "[)"}
@@ -103,6 +109,9 @@ def ceinsum(
 
     # 6) Coalesce: contracting an interleaved index can leave output pieces that
     # overlap along an output dim (e.g. pinpoint j in "ij,i->i"). Rewrite them
-    # into a disjoint set, summing values where they overlapped. A no-op when
-    # the pieces are already disjoint.
-    return coalesce(out)
+    # into a disjoint set, summing values where they overlapped. Only a reduction
+    # can produce such overlaps, and coalesce is itself a no-op when the pieces
+    # are already disjoint.
+    if has_reduction:
+        out = coalesce(out)
+    return out

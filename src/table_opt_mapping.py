@@ -856,8 +856,11 @@ def build_table_opt_mapping(
             idx_a, idx_b = _window_pairs(perm, lo, hi)
 
         elif lead.kind == "overlap":
-            # a_lo[i] < b_hi[j] ∧ b_lo[j] < a_hi[i]
-            #   ⇔   b_lo[j] ∈ ( a_lo[i] - W,  a_hi[i] )   with W = max_j (b_hi - b_lo)
+            # a_lo[i] ≲ b_hi[j] ∧ b_lo[j] ≲ a_hi[i]
+            #   ⇒   b_lo[j] ∈ [ a_lo[i] - W,  a_hi[i] ]   with W = max_j (b_hi - b_lo)
+            # The band is inclusive at both ends so it stays a superset for
+            # non-strict (closed-bracket) predicates; the post-filter below
+            # re-checks the exact strictness either way.
             pl = lead.payload
             a_lo = op[pl["a_lo"]]
             a_hi = op[pl["a_hi"]]
@@ -867,13 +870,15 @@ def build_table_opt_mapping(
             perm = torch.argsort(b_lo)
             b_lo_sorted = b_lo[perm].contiguous()
             lo = torch.searchsorted(b_lo_sorted, a_lo - W, right=False)
-            hi = torch.searchsorted(b_lo_sorted, a_hi,     right=False)
+            hi = torch.searchsorted(b_lo_sorted, a_hi,     right=True)
             idx_a, idx_b = _window_pairs(perm, lo, hi)
 
         elif lead.kind == "point_in_interval":
-            # point[i] ∈ [interval_lo[j], interval_hi[j])
-            #   ⇔   interval_lo[j] ∈ ( point[i] - W,  point[i] ]
+            # point[i] ∈ [interval_lo[j], interval_hi[j]]
+            #   ⇒   interval_lo[j] ∈ [ point[i] - W,  point[i] ]
             #   with W = max_j (interval_hi - interval_lo)
+            # Inclusive at both ends (superset for closed brackets); the
+            # post-filter re-checks the exact strictness.
             pl = lead.payload
             point_is_a = pl["point_axis"] == axis_a
             point = op[pl["point_tensor"]]
@@ -882,7 +887,7 @@ def build_table_opt_mapping(
             W = (ie_ - is_).max()
             perm = torch.argsort(is_)
             is_sorted = is_[perm].contiguous()
-            lo = torch.searchsorted(is_sorted, point - W, right=True)
+            lo = torch.searchsorted(is_sorted, point - W, right=False)
             hi = torch.searchsorted(is_sorted, point,     right=True)
             row_p, col_p = _window_pairs(perm, lo, hi)
             # row_p indexes the point side; col_p indexes the interval side.
