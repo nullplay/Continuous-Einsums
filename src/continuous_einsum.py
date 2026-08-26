@@ -29,11 +29,13 @@ Example::
 
 from __future__ import annotations
 
+import torch
+
 from ceinsum_equation import parse_equation
-from ceinsum_mask import MaskBuilder, build_mask
+from ceinsum_mask import Mask, MaskBuilder, build_mask
 from ceinsum_merge import merge
 from ceinsum_product import compute_output_properties, compute_product
-from ctensor import ContinuousTensor, continuous_tensor
+from ctensor import ContinuousTensor, continuous_tensor, is_pinpoint
 
 __all__ = ["ContinuousTensor", "continuous_tensor", "ceinsum"]
 
@@ -93,6 +95,26 @@ def ceinsum(
     # (None here: the reduced j has a pinpoint carrier, so it plainly sums).
     mask = build_mask(operands, index_to_operand_dims, out_indices, builder)
 
+    # Fast path — pinned output: when the einsum reduces and some operand is
+    # all-pinpoint with an index pattern equal to the output's (e.g.
+    # "ij,ik,kj->ij" with a pinpoint A), that operand pins every output
+    # coordinate: each candidate's output coords are exactly one of its
+    # pieces' coords. Steps 2+3 then collapse — the product's coordinate
+    # intersection is a plain copy, and the merge (dedup + interval cutting)
+    # is a scatter-add keyed by that operand's piece index. Valid because a
+    # tensor's pieces are pairwise distinct, so piece index ≡ coord tuple.
+    # Without a reduction the default path already is the fast path (coords
+    # copy through the mask, merge is skipped), and the scatter-add's
+    # zero-filtering would only add a device sync.
+    anchor_op = next(
+        (o for o, idx in enumerate(in_indices)
+         if out_indices and idx == out_indices
+         and all(is_pinpoint(p) for p in operands[o].property)),
+        None,
+    )
+    if anchor_op is not None and has_reduction:
+        return _pinned_output(operands, mask, anchor_op)
+
     # 2) Product: per-tuple candidate values and output coordinates.
     # eg: values = [2,3]·[10,10]·[100,200] = [2000,6000]
     #     i coords: start=max(t1.s,t2.s)=[1,1], end=min(t1.e,t2.e)=[2,3]
@@ -112,3 +134,28 @@ def ceinsum(
     return ContinuousTensor(
         tuple(tuple(spec) for spec in product.coords), product.values, out_property
     )
+
+
+def _pinned_output(
+    operands: tuple[ContinuousTensor, ...], mask: Mask, anchor_op: int
+) -> ContinuousTensor:
+    """Product + merge for an all-pinpoint anchor operand matching the output.
+
+    Candidate values are the usual gather-multiply (times the mask measure);
+    everything coordinate-side reduces to a scatter-add over the anchor's
+    pieces: ``out[p] = Σ candidates with piece_idx[anchor][t] == p``. Pieces
+    summing to exact zero are dropped, mirroring :func:`ceinsum_merge.merge`.
+    """
+    piece_idx = mask.piece_idx
+    values = operands[0].values[piece_idx[0]]
+    for op in range(1, len(operands)):
+        values = values * operands[op].values[piece_idx[op]]
+    if mask.values is not None:
+        values = values * mask.values
+
+    anchor = operands[anchor_op]
+    out_vals = torch.zeros(anchor.nnz, dtype=values.dtype, device=values.device)
+    out_vals.index_add_(0, piece_idx[anchor_op], values)
+    keep = out_vals != 0
+    dims = tuple((spec[0][keep],) for spec in anchor.dims)
+    return ContinuousTensor(dims, out_vals[keep], anchor.property)

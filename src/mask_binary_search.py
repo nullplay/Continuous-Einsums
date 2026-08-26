@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, Mapping, Sequence
 
 import torch
@@ -133,6 +134,7 @@ def _parse_expr(node) -> _Expr:
     raise ValueError(f"unsupported AST node {type(node).__name__}")
 
 
+@lru_cache(maxsize=1024)
 def _parse_cond(s: str) -> _Cond:
     tree = ast.parse(s, mode="eval").body
     if not isinstance(tree, ast.Compare) or len(tree.ops) != 1:
@@ -305,19 +307,40 @@ def _try_ineq(c: _Cond, axis_a: str, axis_b: str) -> dict | None:
     return {"a_tensor": n[0], "op": n[1], "b_tensor": n[2]}
 
 
-def _detect_lead(pair_conds: list[_Cond], axis_a: str, axis_b: str) -> _Lead | None:
+def _interval_pair_ok(
+    op: Mapping[str, torch.Tensor], lo_name: str, hi_name: str
+) -> bool:
+    """True when ``(lo, hi)`` behaves like one interval: ``lo <= hi`` rowwise.
+
+    The band-lead patterns match conditions by *shape* only, so two
+    conditions from different dimensions (e.g. the x and y containments of a
+    2-D point-in-box join) can pair into a band whose "interval" mixes
+    unrelated tensors. Such a band has crossing windows (``lo > hi``) for
+    some rows — negative window counts — and a wildly loose ``W`` even when
+    it doesn't crash. Checking the data at build time rejects the pairing so
+    detection keeps scanning for a consistent one.
+    """
+    return bool((op[lo_name] <= op[hi_name]).all())
+
+
+def _detect_lead(
+    pair_conds: list[_Cond], axis_a: str, axis_b: str,
+    op: Mapping[str, torch.Tensor],
+) -> _Lead | None:
     n = len(pair_conds)
     # 1) interval overlap pair
     for i in range(n):
         for j in range(i + 1, n):
             d = _try_overlap(pair_conds[i], pair_conds[j], axis_a, axis_b)
-            if d is not None:
+            if d is not None and _interval_pair_ok(op, d["a_lo"], d["a_hi"]) \
+                    and _interval_pair_ok(op, d["b_lo"], d["b_hi"]):
                 return _Lead("overlap", (i, j), d)
     # 2) point-in-interval pair
     for i in range(n):
         for j in range(i + 1, n):
             d = _try_point_in_interval(pair_conds[i], pair_conds[j], axis_a, axis_b)
-            if d is not None:
+            if d is not None and _interval_pair_ok(
+                    op, d["interval_lo"], d["interval_hi"]):
                 return _Lead("point_in_interval", (i, j), d)
     # 3) single equality
     for i, c in enumerate(pair_conds):
@@ -631,6 +654,162 @@ def _apply_cmp(left, op, right):
     return _APPLY_CMP[op](left, right)
 
 
+def _normalize_c_cond(c: _Cond, axis_c: str) -> tuple[_Expr, str, _Expr] | None:
+    """Rewrite ``c`` as ``c_side OP pair_side`` with the ``axis_c`` refs on the
+    left. None when both or neither side touches ``axis_c``."""
+    l_has = axis_c in c.left.axes()
+    r_has = axis_c in c.right.axes()
+    if l_has == r_has:
+        return None
+    if l_has:
+        return (c.left, c.op, c.right)
+    return (c.right, _FLIP[c.op], c.left)
+
+
+def _detect_c_band(c_conds: list[_Cond], axis_c: str) -> dict | None:
+    """Pick a band for the second-level join over ``axis_c``.
+
+    After the pair lead produces ``P`` candidate ``(a, b)`` rows, the third
+    axis is joined the same way the first two were: sort one bare ``axis_c``
+    tensor (the key) and window each pair row into it via searchsorted,
+    instead of materializing the ``(P, K)`` broadcast. Returns the band spec
+    (kind ``eq``/``band``/``upper``/``lower`` plus the key/width tensor names
+    and the pair-side bound exprs) or None when no condition is bandable —
+    the caller then falls back to a chunked broadcast. Bands are supersets
+    (inclusive searchsorted, worst-case width); the exact conditions are
+    re-checked on the candidates either way.
+    """
+    eq: dict | None = None
+    uppers: list[tuple[str, _Expr]] = []
+    lowers: list[tuple[str, _Expr]] = []
+    for c in c_conds:
+        norm = _normalize_c_cond(c, axis_c)
+        if norm is None:
+            continue
+        cexpr, opstr, pexpr = norm
+        bare = _expr_is_indexed_tensor(cexpr)
+        if bare is None or bare[1] != axis_c or axis_c in pexpr.axes():
+            continue
+        tname = bare[0]
+        if opstr == "==":
+            eq = {"kind": "eq", "key": tname, "lo_expr": pexpr,
+                  "hi_expr": pexpr, "width": None}
+        elif opstr in ("<", "<="):
+            uppers.append((tname, pexpr))
+        elif opstr in (">", ">="):
+            lowers.append((tname, pexpr))
+    if eq is not None:
+        return eq
+    if uppers and lowers:
+        # key ≤ hi_expr  ∧  width_tensor ≥ lo_expr. The second bound maps to
+        # the key via W = max(width − key): width ≥ lo ⟹ key ≥ lo − W.
+        (u, phi), (v, plo) = uppers[0], lowers[0]
+        return {"kind": "band", "key": u, "hi_expr": phi,
+                "lo_expr": plo, "width": v}
+    if uppers:
+        u, phi = uppers[0]
+        return {"kind": "upper", "key": u, "hi_expr": phi,
+                "lo_expr": None, "width": None}
+    if lowers:
+        v, plo = lowers[0]
+        return {"kind": "lower", "key": v, "hi_expr": None,
+                "lo_expr": plo, "width": None}
+    return None
+
+
+def _detect_c_grid(
+    c_conds: list[_Cond], axis_c: str, op: Mapping[str, torch.Tensor]
+) -> list[dict] | None:
+    """Two independent (upper, lower) band groups on distinct ``axis_c`` keys
+    → a 2-D grid-bucket join spec.
+
+    A single c-band windows the pair rows over ONE sorted key and re-checks
+    every other ``axis_c`` condition on the candidates, so its volume is
+    ``Σ_rows window`` regardless of how selective the other constraints are
+    (~0.3% selectivity on the triple-contract case). When a second
+    (upper, lower) pair exists on a different key tensor — e.g. C's k-interval
+    next to its j-interval — bucketing ``axis_c`` on both keys lets each pair
+    row enumerate only the few grid cells its query rectangle touches.
+
+    Groups are validated on the data like :func:`_interval_pair_ok`: a lower
+    tensor pairs with an upper key only when ``lower >= key`` rowwise, and the
+    tightest such pairing (smallest max width) wins. Returns ``None`` when an
+    equality band exists (already exact) or fewer than two groups emerge —
+    the caller falls back to the 1-D band.
+    """
+    uppers: list[tuple[str, _Expr]] = []
+    lowers: list[tuple[str, _Expr]] = []
+    for c in c_conds:
+        norm = _normalize_c_cond(c, axis_c)
+        if norm is None:
+            continue
+        cexpr, opstr, pexpr = norm
+        bare = _expr_is_indexed_tensor(cexpr)
+        if bare is None or bare[1] != axis_c or axis_c in pexpr.axes():
+            continue
+        if opstr == "==":
+            return None  # the exact eq band beats any grid
+        if opstr in ("<", "<="):
+            uppers.append((bare[0], pexpr))
+        elif opstr in (">", ">="):
+            lowers.append((bare[0], pexpr))
+
+    groups: list[dict] = []
+    used: set[int] = set()
+    for u, phi in uppers:
+        best: tuple[float, int, str, _Expr] | None = None
+        for li, (v, plo) in enumerate(lowers):
+            if li in used or v == u:
+                continue
+            d = op[v] - op[u]
+            if bool((d >= 0).all()):
+                w = float(d.max())
+                if best is None or w < best[0]:
+                    best = (w, li, v, plo)
+        if best is not None:
+            used.add(best[1])
+            groups.append(
+                {"key": u, "hi_expr": phi, "lo_expr": best[3], "W": best[0]}
+            )
+        if len(groups) == 2:
+            break
+    if len(groups) < 2 or groups[0]["key"] == groups[1]["key"]:
+        return None
+    return groups
+
+
+_GRID_MAX_BUCKETS = 1 << 14
+
+
+def _build_c_grid_index(
+    op: Mapping[str, torch.Tensor], c_grid: list[dict]
+) -> dict:
+    """Bucket ``axis_c`` pieces on the two grid keys (build-time; the operand
+    tensors are fixed once the builder is constructed).
+
+    Bucket side per group is its band width ``W`` (a query window then spans
+    ~2 buckets), floored so the per-axis bucket count stays ≤ 2**14. Returns
+    the packed sorted bucket ids, the sort permutation, and the per-group
+    quantization constants used to bucket the pair-side windows identically —
+    the same ``floor((x - off) / B)`` arithmetic keeps quantization monotone,
+    so the enumerated rectangle is a true superset of the exact window.
+    """
+    quant: list[tuple[float, float, int]] = []  # (off, B, nb) per group
+    codes: list[torch.Tensor] = []
+    for g in c_grid:
+        u = op[g["key"]]
+        off = float(u.min())
+        span = float(u.max()) - off
+        B = max(g["W"], span / _GRID_MAX_BUCKETS, torch.finfo(u.dtype).tiny)
+        nb = min(int(span / B) + 1, _GRID_MAX_BUCKETS)
+        b = ((u - off) / B).floor().long().clamp_(0, nb - 1)
+        quant.append((off, B, nb))
+        codes.append(b)
+    ids = codes[0] * quant[1][2] + codes[1]
+    perm = torch.argsort(ids)
+    return {"ids_sorted": ids[perm].contiguous(), "perm": perm, "quant": quant}
+
+
 # ---------------------------------------------------------------------------
 # Closure builders.
 # ---------------------------------------------------------------------------
@@ -719,7 +898,40 @@ def _build_three_axis_band_closure(
 # ---------------------------------------------------------------------------
 
 
+# Constructed closures memoized across calls: construction re-parses the
+# condition DSL, scans lead patterns (whose _interval_pair_ok data checks each
+# force a GPU→host sync), and builds the grid index — pure fixed overhead when
+# the same join runs repeatedly. The key pins every operand tensor's identity
+# (data_ptr) AND its in-place version counter, so mutated or replaced tensors
+# miss the cache; equal-but-distinct tensors also miss (correct, just colder).
+_BUILDER_CACHE: dict[tuple, Callable[[], tuple[torch.Tensor, ...]]] = {}
+_BUILDER_CACHE_MAX = 64
+
+
 def build_binary_search_mask(
+    op: Mapping[str, torch.Tensor],
+    output: Sequence[str],
+    cond: Sequence[str],
+) -> Callable[[], tuple[torch.Tensor, ...]]:
+    key = (
+        tuple(output),
+        tuple(cond),
+        tuple(sorted(
+            (name, t.data_ptr(), int(t.shape[0]), str(t.dtype),
+             str(t.device), t._version)
+            for name, t in op.items()
+        )),
+    )
+    run = _BUILDER_CACHE.get(key)
+    if run is None:
+        run = _build_binary_search_mask(op, output, cond)
+        if len(_BUILDER_CACHE) >= _BUILDER_CACHE_MAX:
+            _BUILDER_CACHE.clear()
+        _BUILDER_CACHE[key] = run
+    return run
+
+
+def _build_binary_search_mask(
     op: Mapping[str, torch.Tensor],
     output: Sequence[str],
     cond: Sequence[str],
@@ -793,7 +1005,7 @@ def build_binary_search_mask(
     if composite is not None:
         lead, op, _, _ = composite
     if lead is None:
-        lead = _detect_lead(pair_conds, axis_a, axis_b) if pair_conds else None
+        lead = _detect_lead(pair_conds, axis_a, axis_b, op) if pair_conds else None
     three_axis_lead: _Lead | None = None
     if lead is None and axis_c is not None:
         three_axis_lead = _detect_three_axis_band_lead(c_conds, axis_a, axis_b, axis_c)
@@ -819,6 +1031,9 @@ def build_binary_search_mask(
     else:
         consumed = set(lead.consumed)
     pair_post = [c for i, c in enumerate(pair_conds) if i not in consumed]
+    c_band = _detect_c_band(c_conds, axis_c) if axis_c is not None else None
+    c_grid = _detect_c_grid(c_conds, axis_c, op) if axis_c is not None else None
+    grid_index = _build_c_grid_index(op, c_grid) if c_grid is not None else None
 
     def opt_mapping() -> tuple[torch.Tensor, ...]:
         # ---- 1) Run lead: every kind reduces to (perm, lo, hi) over a sorted b-side. ----
@@ -915,18 +1130,191 @@ def build_binary_search_mask(
         if axis_c is None:
             return (idx_a, idx_b)
 
-        # ---- 3) Third axis: build (P, K) mask, then nonzero ----
+        # ---- 3) Third axis: second band join over axis_c ----
         # c_conds is guaranteed non-empty here: every output axis must be
         # referenced (validated above), so an output axis_c implies at least
         # one cond references it and got bucketed into c_conds.
-        pk_mask: torch.Tensor | None = None
-        for cond in c_conds:
-            left = _eval_expr_pk(cond.left, op, idx_pair, axis_c)
-            right = _eval_expr_pk(cond.right, op, idx_pair, axis_c)
-            m = _apply_cmp(left, cond.op, right)
-            pk_mask = m if pk_mask is None else pk_mask & m
-        pk = torch.nonzero(pk_mask, as_tuple=False)
-        p_idx, k_idx = pk[:, 0], pk[:, 1]
+        P = idx_a.shape[0]
+        K = axis_size[axis_c]
+        if P == 0 or K == 0:
+            empty_c = idx_a.new_empty(0)
+            return (idx_a[:0], idx_b[:0], empty_c)
+
+        def _pvals(expr: _Expr, ref: torch.Tensor) -> torch.Tensor:
+            v = _eval_expr_pairs(expr, op, idx_pair)
+            if not isinstance(v, torch.Tensor):
+                v = torch.full((P,), float(v), dtype=ref.dtype,
+                               device=ref.device)
+            return v
+
+        if grid_index is not None:
+            # 2-D grid-bucket join (see _detect_c_grid): each pair row's
+            # query rectangle [lo1-W1, hi1] × [lo2-W2, hi2] is quantized with
+            # the same floor((x-off)/B) arithmetic that bucketed the axis_c
+            # keys, so the enumerated buckets are a superset of the exact
+            # window; every c cond is re-checked on the candidates.
+            g1, g2 = c_grid
+            (off1, B1, nb1), (off2, B2, nb2) = grid_index["quant"]
+            u1 = op[g1["key"]]
+            ids_sorted = grid_index["ids_sorted"]
+            perm_c = grid_index["perm"]
+
+            lo1 = _pvals(g1["lo_expr"], u1) - g1["W"]
+            hi1 = _pvals(g1["hi_expr"], u1)
+            lo2 = _pvals(g2["lo_expr"], u1) - g2["W"]
+            hi2 = _pvals(g2["hi_expr"], u1)
+            r1lo = ((lo1 - off1) / B1).floor().long().clamp_(0, nb1 - 1)
+            r1hi = ((hi1 - off1) / B1).floor().long().clamp_(0, nb1 - 1)
+            r2lo = ((lo2 - off2) / B2).floor().long().clamp_(0, nb2 - 1)
+            r2hi = ((hi2 - off2) / B2).floor().long().clamp_(0, nb2 - 1)
+            n1 = (r1hi - r1lo + 1).clamp(min=0)
+            n2 = (r2hi - r2lo + 1).clamp(min=0)
+            nrect = n1 * n2
+            csum_r = nrect.cumsum(0)
+            total_rects = int(csum_r[-1])
+            budget = 1 << 25
+            outs_g: list[tuple[torch.Tensor, ...]] = []
+            r0 = 0
+            while r0 < P:
+                if total_rects <= budget:
+                    r_end = P
+                else:
+                    base = int(csum_r[r0 - 1]) if r0 > 0 else 0
+                    r_end = int(torch.searchsorted(
+                        csum_r,
+                        torch.tensor(base + budget, device=csum_r.device),
+                        right=True,
+                    )) + 1
+                    r_end = min(max(r_end, r0 + 1), P)
+                sl = slice(r0, r_end)
+                cnt = nrect[sl]
+                rows_local = torch.repeat_interleave(
+                    torch.arange(r_end - r0, dtype=torch.long,
+                                 device=cnt.device), cnt
+                )
+                starts = cnt.cumsum(0) - cnt
+                loc = torch.arange(int(cnt.sum()), dtype=torch.long,
+                                   device=cnt.device) - starts[rows_local]
+                w2 = n2[sl][rows_local]
+                o1 = loc // w2
+                o2 = loc - o1 * w2
+                bid = (r1lo[sl][rows_local] + o1) * nb2 \
+                    + (r2lo[sl][rows_local] + o2)
+                blo = torch.searchsorted(ids_sorted, bid, right=False)
+                bhi = torch.searchsorted(ids_sorted, bid, right=True)
+                rrows, k_idx = _window_pairs(perm_c, blo, bhi)
+                rows_glob = rows_local[rrows] + r0
+                cand_idx = {axis_a: idx_a[rows_glob],
+                            axis_b: idx_b[rows_glob], axis_c: k_idx}
+                keep: torch.Tensor | None = None
+                for cond in c_conds:
+                    left = _eval_expr_pairs(cond.left, op, cand_idx)
+                    right = _eval_expr_pairs(cond.right, op, cand_idx)
+                    m = _apply_cmp(left, cond.op, right)
+                    keep = m if keep is None else keep & m
+                if keep is not None:
+                    outs_g.append((cand_idx[axis_a][keep],
+                                   cand_idx[axis_b][keep], k_idx[keep]))
+                else:
+                    outs_g.append((cand_idx[axis_a], cand_idx[axis_b], k_idx))
+                r0 = r_end
+            return tuple(torch.cat(cols) for cols in zip(*outs_g))
+
+        if c_band is not None:
+            # Join the P pair rows against sorted axis_c pieces exactly like
+            # the pair lead joined the first two axes — memory scales with
+            # the band candidates, not P·K.
+            key = op[c_band["key"]]
+            perm_c = torch.argsort(key)
+            key_sorted = key[perm_c].contiguous()
+
+            kind = c_band["kind"]
+            if kind == "eq":
+                pv = _pvals(c_band["lo_expr"], key)
+                lo = torch.searchsorted(key_sorted, pv, right=False)
+                hi = torch.searchsorted(key_sorted, pv, right=True)
+            elif kind == "band":
+                w = (op[c_band["width"]] - key).max()
+                lo = torch.searchsorted(
+                    key_sorted, _pvals(c_band["lo_expr"], key) - w, right=False
+                )
+                hi = torch.searchsorted(
+                    key_sorted, _pvals(c_band["hi_expr"], key), right=True
+                )
+            elif kind == "upper":
+                hi = torch.searchsorted(
+                    key_sorted, _pvals(c_band["hi_expr"], key), right=True
+                )
+                lo = None
+            else:  # "lower"
+                lo = torch.searchsorted(
+                    key_sorted, _pvals(c_band["lo_expr"], key), right=False
+                )
+                hi = torch.full((P,), K, dtype=lo.dtype, device=lo.device)
+
+            # The window sizes are known before materializing, so the band
+            # candidates (a superset of the survivors) can be enumerated in
+            # blocks of bounded size — the peak footprint stays ~constant
+            # however loose the band is.
+            counts = hi if lo is None else hi - lo
+            csum = counts.cumsum(0)
+            total = int(csum[-1])
+            budget = 1 << 26
+            outs: list[tuple[torch.Tensor, ...]] = []
+            r0 = 0
+            while r0 < P:
+                if total <= budget:
+                    r1 = P
+                else:
+                    base = int(csum[r0 - 1]) if r0 > 0 else 0
+                    r1 = int(torch.searchsorted(
+                        csum, torch.tensor(base + budget, device=csum.device),
+                        right=True,
+                    )) + 1
+                    r1 = max(r1, r0 + 1)
+                    r1 = min(r1, P)
+                rows, k_idx = _window_pairs(
+                    perm_c,
+                    None if lo is None else lo[r0:r1],
+                    hi[r0:r1],
+                )
+                rows = rows + r0
+                # Bands are inclusive supersets — re-check every c cond.
+                cand_idx = {axis_a: idx_a[rows], axis_b: idx_b[rows],
+                            axis_c: k_idx}
+                keep: torch.Tensor | None = None
+                for cond in c_conds:
+                    left = _eval_expr_pairs(cond.left, op, cand_idx)
+                    right = _eval_expr_pairs(cond.right, op, cand_idx)
+                    m = _apply_cmp(left, cond.op, right)
+                    keep = m if keep is None else keep & m
+                if keep is not None:
+                    outs.append((cand_idx[axis_a][keep],
+                                 cand_idx[axis_b][keep], k_idx[keep]))
+                else:
+                    outs.append((cand_idx[axis_a], cand_idx[axis_b], k_idx))
+                r0 = r1
+            return tuple(torch.cat(cols) for cols in zip(*outs))
+
+        # No bandable condition (e.g. offset bands coupling all three axes):
+        # fall back to the (rows, K) broadcast, chunked so the boolean stays
+        # bounded (~128 M elements) instead of P·K.
+        block = max(1, (1 << 27) // K)
+        outs_p: list[torch.Tensor] = []
+        outs_k: list[torch.Tensor] = []
+        for s in range(0, P, block):
+            sub_pair = {ax: v[s:s + block] for ax, v in idx_pair.items()}
+            pk_mask: torch.Tensor | None = None
+            for cond in c_conds:
+                left = _eval_expr_pk(cond.left, op, sub_pair, axis_c)
+                right = _eval_expr_pk(cond.right, op, sub_pair, axis_c)
+                m = _apply_cmp(left, cond.op, right)
+                pk_mask = m if pk_mask is None else pk_mask & m
+            pk = torch.nonzero(pk_mask, as_tuple=False)
+            outs_p.append(pk[:, 0] + s)
+            outs_k.append(pk[:, 1])
+        p_idx = torch.cat(outs_p)
+        k_idx = torch.cat(outs_k)
         return (idx_a[p_idx], idx_b[p_idx], k_idx)
 
     return opt_mapping
